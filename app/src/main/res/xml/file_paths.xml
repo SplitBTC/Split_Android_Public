@@ -1,0 +1,9 @@
+<?xml version="1.0" encoding="utf-8"?>
+<paths xmlns:android="http://schemas.android.com/apk/res/android">
+    <cache-path
+        name="message_attachment_previews"
+        path="message_attachment_previews/" />
+    <cache-path
+        name="share_images"
+        path="shared/" />
+</paths>

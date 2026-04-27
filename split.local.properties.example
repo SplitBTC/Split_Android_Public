@@ -1,0 +1,10 @@
+# Copy this file to `split.local.properties` and set your own local app config.
+#
+# Example:
+# split.debugBaseUrl=https://your-dev-backend.example.com
+# split.releaseBaseUrl=https://your-production-backend.example.com
+# split.messagingIdentityDomain=example.com
+# split.lightningAddressDomain=example.com
+# split.supportLightningAddress=support@example.com
+# split.applicationId=com.example.splitandroid
+# MAPS_API_KEY=YOUR_MAPS_API_KEY
