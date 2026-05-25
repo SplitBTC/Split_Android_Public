@@ -33,6 +33,7 @@ class LndRestClient(
     private val hostnameVerifier = pinnedCertificateBytes?.let { pinnedBytes ->
         HostnameVerifier { _, session -> session.containsPinnedCertificate(pinnedBytes) }
     }
+    private val transport = credentials.transport
 
     suspend fun getInfo(): LndGetInfoResponse {
         val json = requestJson(path = "/v1/getinfo")
@@ -279,7 +280,12 @@ class LndRestClient(
         readTimeout: Int = readTimeoutMillis
     ): HttpsURLConnection {
         val url = URL(makeUrlString(path = path, queryItems = queryItems))
-        val connection = (url.openConnection() as HttpsURLConnection).apply {
+        val rawConnection = if (transport == RemoteNodeTransport.TOR) {
+            url.openConnection(RemoteNodeTorTransport.proxy)
+        } else {
+            url.openConnection()
+        }
+        val connection = (rawConnection as HttpsURLConnection).apply {
             requestMethod = method
             connectTimeout = connectTimeoutMillis
             this.readTimeout = readTimeout

@@ -14,6 +14,7 @@ dependencyResolutionManagement {
         google()
         mavenCentral()
         maven(url = "https://mvn.breez.technology/releases")
+        maven(url = "https://raw.githubusercontent.com/guardianproject/gpmaven/master")
     }
 }
 

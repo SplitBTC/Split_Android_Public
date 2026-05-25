@@ -23,6 +23,8 @@ import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.rounded.Close
+import androidx.compose.material.icons.rounded.Percent
+import androidx.compose.material.icons.rounded.Person
 import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.Icon
 import androidx.compose.material3.MaterialTheme
@@ -36,14 +38,12 @@ import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
-import androidx.compose.ui.draw.blur
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.dp
-import com.split.android.core.AppConfig
 import com.split.android.data.rewards.RewardStatsResponse
 import com.split.android.ui.MainTabHeader
 import com.split.android.ui.SplitFeatureIcons
@@ -60,7 +60,7 @@ internal val RewardsHowItWorksParagraphs = listOf(
     "You get credited for all of the Bitcoin you spend with verified merchants.",
     "Your Bitcoin reward is determined by your percentage of spend relative to the platform. If you account for 5% of the platform's reward eligible spending, you receive 5% of the Bitcoin rewards pot.",
     "As reward eligible spend grows, we will grow the size of the Bitcoin rewards pool. Our goal is simple: Drive real world Bitcoin transactions.",
-    "If you have any questions, comments, suggestions, or concerns please reach out to ${AppConfig.supportLightningAddress}"
+    "If you have any questions, comments, suggestions, or concerns please reach out to support@example.com"
 )
 
 @Composable
@@ -210,17 +210,15 @@ private fun RewardsBackgroundAtmosphere() {
         Box(
             modifier = Modifier
                 .fillMaxWidth()
-                .height(220.dp)
+                .height(170.dp)
                 .background(
-                    Brush.linearGradient(
+                    Brush.verticalGradient(
                         colors = listOf(
-                            SplitBrandPink.copy(alpha = 0.28f),
-                            SplitBrandBlue.copy(alpha = 0.08f),
+                            Color.White.copy(alpha = 0.045f),
                             Color.Transparent
                         )
                     )
                 )
-                .blur(10.dp)
         )
         Spacer(modifier = Modifier.weight(1f))
     }
@@ -294,198 +292,317 @@ private fun RewardsHeroCard(
     stats: RewardStatsResponse,
     btcUsdRate: Double?
 ) {
+    Column(
+        modifier = Modifier.fillMaxWidth(),
+        verticalArrangement = Arrangement.spacedBy(18.dp)
+    ) {
+        ProjectedRewardSummary(
+            stats = stats,
+            btcUsdRate = btcUsdRate
+        )
+
+        Column(verticalArrangement = Arrangement.spacedBy(10.dp)) {
+            RewardsSectionLabel("Your Stats")
+
+            RewardsDetailRow(
+                title = "Your Share",
+                subtitle = "Of this month's rewards pot",
+                value = stats.stats.shareBps.toShareLabel(),
+                icon = Icons.Rounded.Percent,
+                accent = SplitBrandPink
+            )
+
+            RewardsDetailRow(
+                title = "Your Reward Spend",
+                subtitle = stats.user.transactions.toTransactionsLabel(),
+                value = stats.user.rewardSpendCents.toUsdFromCents(),
+                icon = Icons.Rounded.Person,
+                accent = SplitBrandBlue
+            )
+
+            RewardsDetailRow(
+                title = "Your Lifetime BTC",
+                subtitle = "Paid rewards",
+                value = stats.stats.lifetimeEarningsSats.toBtcLabel(),
+                icon = SplitFeatureIcons.Rewards,
+                accent = SplitBrandPink
+            )
+        }
+
+        Column(verticalArrangement = Arrangement.spacedBy(10.dp)) {
+            RewardsSectionLabel("Platform")
+
+            RewardsPlatformCard(
+                rewardSpend = stats.platform.rewardSpendCents.toUsdFromCents(),
+                transactions = stats.platform.transactions.toTransactionsLabel()
+            )
+        }
+    }
+}
+
+@Composable
+private fun ProjectedRewardSummary(
+    stats: RewardStatsResponse,
+    btcUsdRate: Double?
+) {
     Surface(
         modifier = Modifier.fillMaxWidth(),
-        shape = RoundedCornerShape(28.dp),
-        color = Color.Transparent,
-        border = BorderStroke(1.dp, Color.White.copy(alpha = 0.12f))
+        shape = RoundedCornerShape(26.dp),
+        color = SplitBlack,
+        border = BorderStroke(1.dp, Color.White.copy(alpha = 0.16f))
     ) {
-        Box(
-            modifier = Modifier
-                .background(
-                    Brush.linearGradient(
-                        colors = listOf(
-                            SplitBrandPink,
-                            Color(0xFF6D3B96),
-                            Color(0xFF1C2A52)
-                        )
-                    ),
-                    shape = RoundedCornerShape(28.dp)
-                )
-                .padding(20.dp)
+        Column(
+            modifier = Modifier.padding(22.dp),
+            verticalArrangement = Arrangement.spacedBy(20.dp)
         ) {
-            Column(verticalArrangement = Arrangement.spacedBy(16.dp)) {
-                Row(verticalAlignment = Alignment.Top) {
-                    Column(
-                        modifier = Modifier.weight(1f),
-                        verticalArrangement = Arrangement.spacedBy(6.dp)
-                    ) {
-                        Text(
-                            text = "Monthly Rewards",
-                            style = MaterialTheme.typography.headlineMedium,
-                            color = Color.White,
-                            fontWeight = FontWeight.Black
-                        )
-                    }
-
-                    Column(
-                        horizontalAlignment = Alignment.End,
-                        verticalArrangement = Arrangement.spacedBy(8.dp)
-                    ) {
-                        Text(
-                            text = stats.monthKey,
-                            style = MaterialTheme.typography.bodyMedium,
-                            color = Color.White.copy(alpha = 0.82f),
-                            textAlign = TextAlign.End
-                        )
-                        MiniPill(text = "LIVE", accent = Color.White)
-                    }
-                }
-
-                Row(horizontalArrangement = Arrangement.spacedBy(12.dp)) {
-                    RewardsHighlightPanel(
-                        modifier = Modifier.weight(1f),
-                        title = "Your Rewards",
-                        btcValue = stats.stats.projectedEarningsSats.toBtcLabel(),
-                        usdValue = stats.stats.projectedEarningsSats.toUsdFromSats(btcUsdRate),
-                        accent = SplitBrandPink
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                verticalAlignment = Alignment.CenterVertically
+            ) {
+                Column(
+                    modifier = Modifier.weight(1f),
+                    verticalArrangement = Arrangement.spacedBy(5.dp)
+                ) {
+                    Text(
+                        text = "Monthly Rewards",
+                        style = MaterialTheme.typography.bodyLarge,
+                        color = Color.White.copy(alpha = 0.66f),
+                        fontWeight = FontWeight.SemiBold
                     )
-                    RewardsHighlightPanel(
-                        modifier = Modifier.weight(1f),
-                        title = "Rewards Pot",
-                        btcValue = stats.monthlyPot.sats.toBtcLabel(),
-                        usdValue = stats.monthlyPot.sats.toUsdFromSats(btcUsdRate),
-                        accent = SplitBrandBlue
+                    Text(
+                        text = "Current projection",
+                        style = MaterialTheme.typography.bodyMedium,
+                        color = Color.White.copy(alpha = 0.46f),
+                        fontWeight = FontWeight.Medium
                     )
                 }
 
-                Surface(
+                Row(
                     modifier = Modifier
-                        .fillMaxWidth()
-                        .height(1.dp),
-                    color = Color.White.copy(alpha = 0.12f)
-                ) {}
-
-                Column(verticalArrangement = Arrangement.spacedBy(10.dp)) {
-                    RewardsMetricRow(
-                        leftTitle = "Your Share of the pot",
-                        leftValue = stats.stats.shareBps.toShareLabel(),
-                        rightTitle = "Your Lifetime BTC Rewards",
-                        rightValue = stats.stats.lifetimeEarningsSats.toBtcLabel()
+                        .clip(RoundedCornerShape(999.dp))
+                        .background(Color.White.copy(alpha = 0.08f))
+                        .padding(horizontal = 12.dp, vertical = 8.dp),
+                    verticalAlignment = Alignment.CenterVertically,
+                    horizontalArrangement = Arrangement.spacedBy(8.dp)
+                ) {
+                    Text(
+                        text = stats.monthKey,
+                        style = MaterialTheme.typography.labelMedium,
+                        color = Color.White.copy(alpha = 0.76f),
+                        fontWeight = FontWeight.Bold
                     )
-
-                    RewardsMetricRow(
-                        leftTitle = "Your Reward Spend",
-                        leftValue = stats.user.rewardSpendCents.toUsdFromCents(),
-                        rightTitle = "Your Transactions",
-                        rightValue = "${stats.user.transactions}"
-                    )
-
-                    RewardsMetricRow(
-                        leftTitle = "Platform Reward Spend",
-                        leftValue = stats.platform.rewardSpendCents.toUsdFromCents(),
-                        rightTitle = "Platform Transactions",
-                        rightValue = "${stats.platform.transactions}"
+                    Box(
+                        modifier = Modifier
+                            .size(7.dp)
+                            .clip(CircleShape)
+                            .background(SplitBrandPink)
                     )
                 }
+            }
+
+            Row(horizontalArrangement = Arrangement.spacedBy(12.dp)) {
+                HeroRewardMetric(
+                    modifier = Modifier.weight(1f),
+                    title = "Your Rewards",
+                    primaryValue = stats.stats.projectedEarningsSats.toUsdFromSats(btcUsdRate),
+                    secondaryValue = stats.stats.projectedEarningsSats.toBtcLabel(),
+                    accent = SplitBrandPink
+                )
+
+                HeroRewardMetric(
+                    modifier = Modifier.weight(1f),
+                    title = "Rewards Pot",
+                    primaryValue = stats.monthlyPot.sats.toUsdFromSats(btcUsdRate),
+                    secondaryValue = stats.monthlyPot.sats.toBtcLabel(),
+                    accent = SplitBrandBlue
+                )
             }
         }
     }
 }
 
 @Composable
-private fun RewardsHighlightPanel(
+private fun HeroRewardMetric(
     modifier: Modifier = Modifier,
     title: String,
-    btcValue: String,
-    usdValue: String,
+    primaryValue: String,
+    secondaryValue: String,
     accent: Color
 ) {
     Surface(
         modifier = modifier,
-        shape = RoundedCornerShape(20.dp),
-        color = Color.White.copy(alpha = 0.08f),
-        border = BorderStroke(1.dp, Color.White.copy(alpha = 0.10f))
+        shape = RoundedCornerShape(18.dp),
+        color = Color.White.copy(alpha = 0.055f),
+        border = BorderStroke(1.dp, Color.White.copy(alpha = 0.08f))
     ) {
         Column(
-            modifier = Modifier.padding(horizontal = 14.dp, vertical = 16.dp),
+            modifier = Modifier.padding(15.dp),
             verticalArrangement = Arrangement.spacedBy(8.dp)
         ) {
-            Row(
-                verticalAlignment = Alignment.CenterVertically,
-                horizontalArrangement = Arrangement.spacedBy(8.dp)
-            ) {
-                Box(
-                    modifier = Modifier
-                        .size(10.dp)
-                        .clip(CircleShape)
-                        .background(accent)
-                )
-                Text(
-                    text = title,
-                    style = MaterialTheme.typography.bodyMedium,
-                    color = Color.White.copy(alpha = 0.78f),
-                    fontWeight = FontWeight.SemiBold
-                )
-            }
-
-            Text(
-                text = btcValue,
-                style = MaterialTheme.typography.titleLarge,
-                color = Color.White,
-                fontWeight = FontWeight.Black
+            Box(
+                modifier = Modifier
+                    .width(30.dp)
+                    .height(3.dp)
+                    .clip(RoundedCornerShape(999.dp))
+                    .background(accent)
             )
 
             Text(
-                text = usdValue,
-                style = MaterialTheme.typography.bodyMedium,
-                color = Color.White.copy(alpha = 0.76f)
+                text = title,
+                style = MaterialTheme.typography.labelMedium,
+                color = Color.White.copy(alpha = 0.58f),
+                fontWeight = FontWeight.SemiBold
+            )
+
+            Text(
+                text = primaryValue,
+                style = MaterialTheme.typography.titleLarge,
+                color = Color.White,
+                fontWeight = FontWeight.Black,
+                maxLines = 1
+            )
+
+            Text(
+                text = secondaryValue,
+                style = MaterialTheme.typography.labelMedium,
+                color = Color.White.copy(alpha = 0.58f),
+                fontWeight = FontWeight.SemiBold,
+                maxLines = 1
             )
         }
     }
 }
 
 @Composable
-private fun RewardsMetricRow(
-    leftTitle: String,
-    leftValue: String,
-    rightTitle: String,
-    rightValue: String
+private fun RewardsSectionLabel(text: String) {
+    Text(
+        text = text.uppercase(Locale.US),
+        modifier = Modifier.padding(horizontal = 2.dp),
+        style = MaterialTheme.typography.labelMedium,
+        color = Color.White.copy(alpha = 0.44f),
+        fontWeight = FontWeight.Bold
+    )
+}
+
+@Composable
+private fun RewardsDetailRow(
+    title: String,
+    subtitle: String,
+    value: String,
+    icon: androidx.compose.ui.graphics.vector.ImageVector,
+    accent: Color
 ) {
-    Row(horizontalArrangement = Arrangement.spacedBy(10.dp)) {
-        RewardsMetricCell(
-            modifier = Modifier.weight(1f),
-            title = leftTitle,
-            value = leftValue
-        )
-        RewardsMetricCell(
-            modifier = Modifier.weight(1f),
-            title = rightTitle,
-            value = rightValue
+    Surface(
+        modifier = Modifier.fillMaxWidth(),
+        shape = RoundedCornerShape(20.dp),
+        color = Color(0xFF141830),
+        border = BorderStroke(1.dp, Color.White.copy(alpha = 0.08f))
+    ) {
+        Row(
+            modifier = Modifier.padding(16.dp),
+            verticalAlignment = Alignment.CenterVertically,
+            horizontalArrangement = Arrangement.spacedBy(14.dp)
+        ) {
+            Box(
+                modifier = Modifier
+                    .size(46.dp)
+                    .clip(RoundedCornerShape(14.dp))
+                    .background(accent.copy(alpha = 0.18f)),
+                contentAlignment = Alignment.Center
+            ) {
+                Icon(
+                    imageVector = icon,
+                    contentDescription = null,
+                    tint = Color.White.copy(alpha = 0.92f),
+                    modifier = Modifier.size(20.dp)
+                )
+            }
+
+            Column(
+                modifier = Modifier.weight(1f),
+                verticalArrangement = Arrangement.spacedBy(4.dp)
+            ) {
+                Text(
+                    text = title,
+                    style = MaterialTheme.typography.bodyMedium,
+                    color = Color.White.copy(alpha = 0.86f),
+                    fontWeight = FontWeight.SemiBold
+                )
+                Text(
+                    text = subtitle,
+                    style = MaterialTheme.typography.labelMedium,
+                    color = Color.White.copy(alpha = 0.48f),
+                    fontWeight = FontWeight.Medium
+                )
+            }
+
+            Text(
+                text = value,
+                style = MaterialTheme.typography.bodyLarge,
+                color = Color.White,
+                fontWeight = FontWeight.SemiBold,
+                textAlign = TextAlign.End
+            )
+        }
+    }
+}
+
+@Composable
+private fun RewardsPlatformCard(
+    rewardSpend: String,
+    transactions: String
+) {
+    Surface(
+        modifier = Modifier.fillMaxWidth(),
+        shape = RoundedCornerShape(20.dp),
+        color = Color.White.copy(alpha = 0.045f),
+        border = BorderStroke(1.dp, Color.White.copy(alpha = 0.08f))
+    ) {
+        PlatformStatRow(
+            title = "Platform Reward Spend",
+            value = rewardSpend,
+            detail = transactions,
+            modifier = Modifier.padding(horizontal = 16.dp, vertical = 17.dp)
         )
     }
 }
 
 @Composable
-private fun RewardsMetricCell(
-    modifier: Modifier = Modifier,
+private fun PlatformStatRow(
     title: String,
-    value: String
+    value: String,
+    detail: String,
+    modifier: Modifier = Modifier
 ) {
-    Column(
-        modifier = modifier,
-        verticalArrangement = Arrangement.spacedBy(6.dp)
+    Row(
+        modifier = modifier.fillMaxWidth(),
+        verticalAlignment = Alignment.CenterVertically,
+        horizontalArrangement = Arrangement.spacedBy(12.dp)
     ) {
-        Text(
-            text = title,
-            style = MaterialTheme.typography.bodySmall,
-            color = Color.White.copy(alpha = 0.62f)
-        )
+        Column(
+            modifier = Modifier.weight(1f),
+            verticalArrangement = Arrangement.spacedBy(4.dp)
+        ) {
+            Text(
+                text = title,
+                style = MaterialTheme.typography.bodyMedium,
+                color = Color.White.copy(alpha = 0.68f),
+                fontWeight = FontWeight.Medium
+            )
+            Text(
+                text = detail,
+                style = MaterialTheme.typography.labelMedium,
+                color = Color.White.copy(alpha = 0.44f),
+                fontWeight = FontWeight.Medium
+            )
+        }
+
         Text(
             text = value,
-            style = MaterialTheme.typography.titleMedium,
+            style = MaterialTheme.typography.bodyLarge,
             color = Color.White,
-            fontWeight = FontWeight.SemiBold
+            fontWeight = FontWeight.SemiBold,
+            textAlign = TextAlign.End
         )
     }
 }
@@ -792,25 +909,6 @@ private fun RewardsFullScreenInfoOverlay(
     }
 }
 
-@Composable
-private fun MiniPill(
-    text: String,
-    accent: Color
-) {
-    Surface(
-        shape = RoundedCornerShape(999.dp),
-        color = Color.White.copy(alpha = 0.12f)
-    ) {
-        Text(
-            text = text,
-            modifier = Modifier.padding(horizontal = 10.dp, vertical = 4.dp),
-            style = MaterialTheme.typography.bodySmall,
-            color = accent,
-            fontWeight = FontWeight.Bold
-        )
-    }
-}
-
 private fun Long.toBtcLabel(): String {
     return String.format(Locale.US, "₿ %.8f", toDouble() / 100_000_000.0)
 }
@@ -827,4 +925,8 @@ private fun Long.toUsdFromCents(): String {
 
 private fun Int.toShareLabel(): String {
     return String.format(Locale.US, "%.2f%%", toDouble() / 100.0)
+}
+
+private fun Int.toTransactionsLabel(): String {
+    return if (this == 1) "1 transaction" else "$this transactions"
 }

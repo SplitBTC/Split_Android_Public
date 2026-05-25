@@ -3,14 +3,16 @@ package com.split.android.ui.home
 import android.content.ClipData
 import android.content.ClipboardManager
 import android.content.Context
+import android.net.Uri
 import android.widget.Toast
+import androidx.activity.compose.rememberLauncherForActivityResult
+import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.BorderStroke
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.interaction.MutableInteractionSource
 import androidx.compose.foundation.layout.Arrangement
-import androidx.compose.foundation.layout.aspectRatio
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.ColumnScope
@@ -33,7 +35,7 @@ import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.rounded.ArrowBack
 import androidx.compose.material.icons.automirrored.rounded.Send
 import androidx.compose.material.icons.rounded.Close
-import androidx.compose.material.icons.rounded.ContentCopy
+import androidx.compose.material.icons.rounded.ContentPaste
 import androidx.compose.material.icons.rounded.Payments
 import androidx.compose.material3.ButtonDefaults
 import androidx.compose.material3.AlertDialog
@@ -62,6 +64,7 @@ import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalFocusManager
 import androidx.compose.ui.platform.LocalSoftwareKeyboardController
+import androidx.compose.ui.text.TextStyle
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.input.KeyboardType
 import androidx.compose.ui.text.style.TextAlign
@@ -70,14 +73,22 @@ import androidx.compose.ui.unit.dp
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import com.split.android.data.wallet.PreparedOutgoingPayment
 import com.split.android.data.wallet.ReceiveInvoice
+import com.split.android.data.wallet.RemoteNodeTorTransport
 import com.split.android.data.wallet.SpendWalletSource
+import com.split.android.data.wallet.TorBootstrapState
+import com.split.android.data.wallet.WalletContact
 import com.split.android.data.wallet.WalletState
+import com.split.android.data.wallet.usesTor
 import com.split.android.ui.SplitFeatureIcons
 import com.split.android.ui.SplitRootViewModel
+import com.split.android.ui.qr.QrImageDecodeResult
 import com.split.android.ui.qr.QrCodeCard
-import com.split.android.ui.qr.SplitQrScannerView
+import com.split.android.ui.qr.SplitFullScreenQrScanner
 import com.split.android.ui.qr.SplitContactPayload
+import com.split.android.ui.qr.isAmountlessBolt11PaymentRequest
 import com.split.android.ui.qr.normalizePaymentRequest
+import com.split.android.ui.qr.readClipboardPaymentText
+import com.split.android.ui.qr.readSingleQrCodeFromImageUri
 import com.split.android.ui.qr.shouldOpenEntryFirstSendFlow
 import com.split.android.ui.theme.SplitBrandBlue
 import com.split.android.ui.theme.SplitBrandPink
@@ -97,6 +108,95 @@ private enum class WalletSendStage {
 }
 
 @Composable
+private fun SendContactPickerDialog(
+    contacts: List<WalletContact>,
+    onDismiss: () -> Unit,
+    onSelect: (WalletContact) -> Unit
+) {
+    AlertDialog(
+        onDismissRequest = onDismiss,
+        containerColor = Color(0xFF101013),
+        titleContentColor = Color.White,
+        textContentColor = Color.White.copy(alpha = 0.72f),
+        title = { Text("Contacts") },
+        text = {
+            if (contacts.isEmpty()) {
+                Text(
+                    text = "No saved contacts yet.",
+                    style = MaterialTheme.typography.bodyMedium,
+                    color = Color.White.copy(alpha = 0.72f)
+                )
+            } else {
+                Column(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .height(360.dp)
+                        .verticalScroll(rememberScrollState()),
+                    verticalArrangement = Arrangement.spacedBy(10.dp)
+                ) {
+                    contacts.forEach { contact ->
+                        Surface(
+                            modifier = Modifier.fillMaxWidth(),
+                            shape = RoundedCornerShape(16.dp),
+                            color = Color.White.copy(alpha = 0.06f),
+                            border = BorderStroke(1.dp, Color.White.copy(alpha = 0.08f)),
+                            onClick = { onSelect(contact) }
+                        ) {
+                            Row(
+                                modifier = Modifier.padding(horizontal = 14.dp, vertical = 12.dp),
+                                horizontalArrangement = Arrangement.spacedBy(12.dp),
+                                verticalAlignment = Alignment.CenterVertically
+                            ) {
+                                Surface(
+                                    modifier = Modifier.size(34.dp),
+                                    shape = CircleShape,
+                                    color = SplitBrandPink.copy(alpha = 0.24f)
+                                ) {
+                                    Box(contentAlignment = Alignment.Center) {
+                                        Text(
+                                            text = contact.name.firstOrNull()?.uppercase().orEmpty(),
+                                            style = MaterialTheme.typography.bodyMedium,
+                                            fontWeight = FontWeight.Bold,
+                                            color = Color.White
+                                        )
+                                    }
+                                }
+
+                                Column(modifier = Modifier.weight(1f)) {
+                                    Text(
+                                        text = contact.name,
+                                        style = MaterialTheme.typography.bodyMedium,
+                                        fontWeight = FontWeight.SemiBold,
+                                        color = Color.White,
+                                        maxLines = 1,
+                                        overflow = TextOverflow.Ellipsis
+                                    )
+                                    Text(
+                                        text = contact.paymentIdentifier,
+                                        style = MaterialTheme.typography.bodySmall,
+                                        color = Color.White.copy(alpha = 0.58f),
+                                        maxLines = 1,
+                                        overflow = TextOverflow.Ellipsis
+                                    )
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        },
+        confirmButton = {
+            Button(
+                onClick = onDismiss,
+                colors = ButtonDefaults.buttonColors(containerColor = SplitBrandPink)
+            ) {
+                Text("Done")
+            }
+        }
+    )
+}
+
+@Composable
 fun WalletSendScreen(
     rootViewModel: SplitRootViewModel,
     initialDestination: String? = null,
@@ -109,12 +209,33 @@ fun WalletSendScreen(
     val context = LocalContext.current
     val walletState by rootViewModel.walletState.collectAsStateWithLifecycle()
     val activeSpendWallet by rootViewModel.activeSpendWallet.collectAsStateWithLifecycle()
+    val connectedLndNode by rootViewModel.connectedLndNode.collectAsStateWithLifecycle()
+    val connectedNwcWallet by rootViewModel.connectedNwcWallet.collectAsStateWithLifecycle()
+    val connectedCoreLightningNode by rootViewModel.connectedCoreLightningNode.collectAsStateWithLifecycle()
+    val connectedEclairNode by rootViewModel.connectedEclairNode.collectAsStateWithLifecycle()
+    val torBootstrapState by RemoteNodeTorTransport.bootstrapState.collectAsStateWithLifecycle()
     val lndBalanceSummary by rootViewModel.lndBalanceSummary.collectAsStateWithLifecycle()
+    val nwcBalanceSummary by rootViewModel.nwcBalanceSummary.collectAsStateWithLifecycle()
+    val coreLightningBalanceSummary by rootViewModel.coreLightningBalanceSummary.collectAsStateWithLifecycle()
+    val eclairBalanceSummary by rootViewModel.eclairBalanceSummary.collectAsStateWithLifecycle()
+    val sparkSubwalletBalanceSummary by rootViewModel.sparkSubwalletBalanceSummary.collectAsStateWithLifecycle()
+    val contactsByPaymentIdentifier by rootViewModel.contactsByPaymentIdentifier.collectAsStateWithLifecycle()
     val sparkBalanceSats = (walletState as? WalletState.Ready)?.balanceSats ?: 0L
-    val walletBalanceSats = if (activeSpendWallet == SpendWalletSource.LND) {
-        lndBalanceSummary?.spendableSats ?: 0L
-    } else {
-        sparkBalanceSats
+    val walletBalanceSats = when (activeSpendWallet) {
+        SpendWalletSource.SPARK -> sparkBalanceSats
+        SpendWalletSource.LND -> lndBalanceSummary?.spendableSats ?: 0L
+        SpendWalletSource.NWC -> nwcBalanceSummary?.spendableSats ?: 0L
+        SpendWalletSource.CORE_LIGHTNING -> coreLightningBalanceSummary?.spendableSats ?: 0L
+        SpendWalletSource.ECLAIR -> eclairBalanceSummary?.spendableSats ?: 0L
+        SpendWalletSource.SPARK_SUBWALLET -> sparkSubwalletBalanceSummary?.spendableSats ?: 0L
+    }
+    val activeSpendWalletUsesTor = when (activeSpendWallet) {
+        SpendWalletSource.LND -> connectedLndNode?.usesTor == true
+        SpendWalletSource.NWC -> connectedNwcWallet?.usesTor == true
+        SpendWalletSource.CORE_LIGHTNING -> connectedCoreLightningNode?.usesTor == true
+        SpendWalletSource.ECLAIR -> connectedEclairNode?.usesTor == true
+        SpendWalletSource.SPARK,
+        SpendWalletSource.SPARK_SUBWALLET -> false
     }
 
     var destination by rememberSaveable(initialDestination) { mutableStateOf(initialDestination.orEmpty()) }
@@ -135,6 +256,7 @@ fun WalletSendScreen(
     var scannedContactPayload by remember { mutableStateOf<SplitContactPayload?>(null) }
     var scannedContactName by rememberSaveable { mutableStateOf("") }
     var scannedContactError by remember { mutableStateOf<String?>(null) }
+    var showContactPicker by remember { mutableStateOf(false) }
     var presetAmountSats by remember { mutableStateOf<Long?>(null) }
     var btcUsdRate by remember { mutableStateOf<Double?>(null) }
     var isLoadingBtcPrice by remember { mutableStateOf(true) }
@@ -153,8 +275,13 @@ fun WalletSendScreen(
         }
     }
 
-    fun showEntryStage(withDestination: String? = null) {
+    fun showEntryStage(withDestination: String? = null, resetAmount: Boolean = false) {
         withDestination?.let { destination = it }
+        if (resetAmount) {
+            amountText = ""
+            presetAmountSats = null
+            isSendMaxAmount = false
+        }
         stage = WalletSendStage.Entry
     }
 
@@ -177,11 +304,11 @@ fun WalletSendScreen(
                     comment = resolvedCommentText(commentText)
                 )
             }.onSuccess { prepared ->
-                preparedPayment = prepared
+                preparedPayment = rootViewModel.checkPreparedPaymentRewards(prepared)
             }.onFailure { error ->
-                val message = error.message ?: "Unable to prepare payment."
+                val message = sendFlowPreparationErrorMessage(error.message)
                 if (allowEntryFallback && shouldFallbackToAmountEntry(message)) {
-                    showEntryStage(withDestination = destinationOverride)
+                    showEntryStage(withDestination = destinationOverride, resetAmount = true)
                 } else if (stage == WalletSendStage.Scan) {
                     scanStatusMessage = message
                 } else {
@@ -203,6 +330,11 @@ fun WalletSendScreen(
     }
 
     fun openScannerFromEntry() {
+        if (activeSpendWalletUsesTor && torBootstrapState !is TorBootstrapState.Ready) {
+            RemoteNodeTorTransport.warmUp(context.applicationContext, scope)
+            errorMessage = "Starting Tor..."
+            return
+        }
         scanStatusMessage = null
         errorMessage = null
         shouldReturnToEntryAfterScan = true
@@ -217,7 +349,7 @@ fun WalletSendScreen(
         destination = normalized
 
         if (shouldOpenEntryFirstSendFlow(normalized)) {
-            showEntryStage(withDestination = normalized)
+            showEntryStage(withDestination = normalized, resetAmount = true)
         } else {
             launchPrepare(
                 destinationOverride = normalized,
@@ -260,7 +392,11 @@ fun WalletSendScreen(
         errorMessage = null
     }
 
-    fun handleScannerInput(raw: String, invalidMessage: String) {
+    fun handleScannerInput(
+        raw: String,
+        invalidMessage: String,
+        showInvalidInEntry: Boolean = false
+    ) {
         val trimmed = raw.trim()
         if (trimmed.isEmpty()) return
 
@@ -271,7 +407,11 @@ fun WalletSendScreen(
 
         val normalized = normalizePaymentRequest(trimmed)
         if (normalized.isNullOrBlank()) {
-            scanStatusMessage = invalidMessage
+            if (showInvalidInEntry) {
+                errorMessage = invalidMessage
+            } else {
+                scanStatusMessage = invalidMessage
+            }
             return
         }
 
@@ -279,23 +419,56 @@ fun WalletSendScreen(
     }
 
     fun pasteFromClipboard() {
-        val clipboard = context.getSystemService(Context.CLIPBOARD_SERVICE) as ClipboardManager
-        val raw = clipboard.primaryClip
-            ?.getItemAt(0)
-            ?.coerceToText(context)
-            ?.toString()
-            ?.trim()
-            .orEmpty()
+        errorMessage = null
+        scanStatusMessage = null
 
-        if (raw.isBlank()) {
-            scanStatusMessage = "Clipboard is empty or doesn't contain text."
+        val clipboardText = readClipboardPaymentText(context)
+        if (clipboardText.isNullOrBlank()) {
+            errorMessage = "Clipboard is empty or doesn’t contain text."
             return
         }
 
         handleScannerInput(
-            raw = raw,
-            invalidMessage = "Clipboard text doesn't contain a supported payment or contact code."
+            raw = clipboardText,
+            invalidMessage = "Clipboard text doesn’t contain a supported payment or contact code.",
+            showInvalidInEntry = true
         )
+    }
+
+    fun handleSelectedQrImage(uri: Uri) {
+        scope.launch {
+            errorMessage = null
+            scanStatusMessage = null
+            isPreparing = true
+
+            val result = runCatching {
+                readSingleQrCodeFromImageUri(context, uri)
+            }.getOrElse {
+                QrImageDecodeResult.ImageUnreadable
+            }
+            isPreparing = false
+
+            when (result) {
+                is QrImageDecodeResult.Success -> {
+                    handleScannerInput(
+                        raw = result.value,
+                        invalidMessage = "Selected QR code image doesn’t contain a supported payment or contact code."
+                    )
+                }
+
+                QrImageDecodeResult.NoQrCode -> {
+                    scanStatusMessage = "No QR code found in this image."
+                }
+
+                QrImageDecodeResult.MultipleQrCodes -> {
+                    scanStatusMessage = "Multiple QR codes found. Choose an image with one QR code."
+                }
+
+                QrImageDecodeResult.ImageUnreadable -> {
+                    scanStatusMessage = "Couldn’t read the selected image."
+                }
+            }
+        }
     }
 
     LaunchedEffect(Unit) {
@@ -317,6 +490,7 @@ fun WalletSendScreen(
             rootViewModel.presetSendAmountSats(trimmedDestination)
         }.getOrNull()
 
+        val hadLockedAmount = presetAmountSats != null
         presetAmountSats = preset?.takeIf { it > 0L }
         if (presetAmountSats != null) {
             isSendMaxAmount = false
@@ -325,7 +499,14 @@ fun WalletSendScreen(
                 lockedAmountSats = presetAmountSats!!,
                 btcUsdRate = btcUsdRate
             )
+        } else if (hadLockedAmount) {
+            isSendMaxAmount = false
+            amountText = ""
         }
+    }
+
+    LaunchedEffect(Unit) {
+        rootViewModel.loadContacts()
     }
 
     LaunchedEffect(amountUnit) {
@@ -388,9 +569,9 @@ fun WalletSendScreen(
                 comment = resolvedCommentText(commentText)
             )
         }.onSuccess { prepared ->
-            preparedPayment = prepared
+            preparedPayment = rootViewModel.checkPreparedPaymentRewards(prepared)
         }.onFailure { error ->
-            errorMessage = error.message ?: "Unable to prepare payment."
+            errorMessage = sendFlowPreparationErrorMessage(error.message)
         }
 
         isPreparing = false
@@ -401,6 +582,7 @@ fun WalletSendScreen(
     val showingEntryStage = preparedPayment == null &&
         stage == WalletSendStage.Entry
     val showingReviewStage = preparedPayment != null
+    val isAmountlessInvoiceEntry = isAmountlessBolt11PaymentRequest(destination)
 
     fun continueFromEntry() {
         errorMessage = null
@@ -472,31 +654,46 @@ fun WalletSendScreen(
                 isSendMaxAmount = isSendMaxAmount,
                 onSelectSendMax = { applySendMaxAmount() },
                 isAmountLocked = presetAmountSats != null,
+                isAmountlessInvoice = isAmountlessInvoiceEntry,
                 isLoadingBtcPrice = isLoadingBtcPrice,
                 btcUsdRate = btcUsdRate,
                 errorMessage = errorMessage,
                 isPreparing = isPreparing,
                 onDismiss = onDismiss,
                 onOpenScanner = ::openScannerFromEntry,
+                onOpenContacts = {
+                    rootViewModel.loadContacts()
+                    showContactPicker = true
+                },
+                onPasteClipboard = ::pasteFromClipboard,
                 onContinue = ::continueFromEntry
             )
         }
 
+        showingScanStage -> WalletSendScanStage(
+            isPreparing = isPreparing,
+            scanStatusMessage = scanStatusMessage,
+            onDismiss = ::handleScanClose,
+            onCodeScanned = { raw ->
+                handleScannerInput(
+                    raw = raw,
+                    invalidMessage = "Couldn't read a supported payment or contact QR."
+                )
+            },
+            onImageSelected = ::handleSelectedQrImage
+        )
+
         else -> FullScreenWalletFlowShell(
             title = when {
                 showingReviewStage -> "Confirm Payment"
-                showingScanStage -> "Send"
                 else -> "Send Bitcoin"
             },
             subtitle = when {
                 showingReviewStage -> ""
-                showingScanStage -> {
-                    "Scan a payment or contact QR."
-                }
                 else -> "Spark address, Lightning address, or invoice"
             },
-            onDismiss = if (showingScanStage) ::handleScanClose else onDismiss,
-            scrollable = !(showingScanStage || showingReviewStage)
+            onDismiss = onDismiss,
+            scrollable = !showingReviewStage
         ) {
             when {
                 preparedPayment != null -> {
@@ -516,17 +713,7 @@ fun WalletSendScreen(
                     )
                 }
 
-                stage == WalletSendStage.Scan -> WalletSendScanStage(
-                    isPreparing = isPreparing,
-                    statusMessage = scanStatusMessage,
-                    onCodeScanned = { raw ->
-                        handleScannerInput(
-                            raw = raw,
-                            invalidMessage = "Couldn't read a supported payment or contact QR."
-                        )
-                    },
-                    onPasteFromClipboard = ::pasteFromClipboard
-                )
+                stage == WalletSendStage.Scan -> Unit
             }
         }
     }
@@ -599,10 +786,27 @@ fun WalletSendScreen(
             }
         )
     }
+
+    if (showContactPicker) {
+        SendContactPickerDialog(
+            contacts = contactsByPaymentIdentifier.values
+                .sortedBy { it.name.lowercase(Locale.US) },
+            onDismiss = { showContactPicker = false },
+            onSelect = { contact ->
+                destination = contact.paymentIdentifier
+                errorMessage = null
+                showContactPicker = false
+            }
+        )
+    }
 }
 
 private fun resolvedCommentText(currentCommentText: String): String? {
     return currentCommentText.trim().ifBlank { null }
+}
+
+private fun sendFlowPreparationErrorMessage(rawMessage: String?): String {
+    return rawMessage?.trim()?.ifBlank { null } ?: "Unable to prepare payment."
 }
 
 @Composable
@@ -616,12 +820,15 @@ private fun WalletSendEntryStage(
     isSendMaxAmount: Boolean,
     onSelectSendMax: () -> Unit,
     isAmountLocked: Boolean,
+    isAmountlessInvoice: Boolean,
     isLoadingBtcPrice: Boolean,
     btcUsdRate: Double?,
     errorMessage: String?,
     isPreparing: Boolean,
     onDismiss: () -> Unit,
     onOpenScanner: () -> Unit,
+    onOpenContacts: () -> Unit,
+    onPasteClipboard: () -> Unit,
     onContinue: () -> Unit
 ) {
     val focusManager = LocalFocusManager.current
@@ -684,31 +891,99 @@ private fun WalletSendEntryStage(
                     color = Color.White.copy(alpha = 0.62f)
                 )
 
-                TextField(
-                    value = destination,
-                    onValueChange = onDestinationChange,
-                    modifier = Modifier
-                        .fillMaxWidth()
-                        .height(130.dp)
-                        .border(
-                            width = 1.dp,
-                            color = Color.White.copy(alpha = 0.08f),
-                            shape = RoundedCornerShape(22.dp)
-                        ),
-                    placeholder = {
-                        Text(
-                            text = "Lightning address, LNURL, invoice, or Bitcoin address",
-                            color = Color.White.copy(alpha = 0.24f)
+                Box {
+                    TextField(
+                        value = destination,
+                        onValueChange = onDestinationChange,
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .height(130.dp)
+                            .border(
+                                width = 1.dp,
+                                color = Color.White.copy(alpha = 0.08f),
+                                shape = RoundedCornerShape(22.dp)
+                            ),
+                        placeholder = {
+                            Text(
+                                text = "Lightning address, invoice, Bitcoin address, or QR code image",
+                                color = Color.White.copy(alpha = 0.24f)
+                            )
+                        },
+                        minLines = 4,
+                        maxLines = 7,
+                        colors = walletSendOverlayFieldColors(),
+                        shape = RoundedCornerShape(22.dp),
+                        textStyle = MaterialTheme.typography.bodyLarge.copy(
+                            fontWeight = FontWeight.Medium
                         )
-                    },
-                    minLines = 4,
-                    maxLines = 7,
-                    colors = walletSendOverlayFieldColors(),
-                    shape = RoundedCornerShape(22.dp),
-                    textStyle = MaterialTheme.typography.bodyLarge.copy(
-                        fontWeight = FontWeight.Medium
                     )
-                )
+
+                    Surface(
+                        modifier = Modifier
+                            .align(Alignment.BottomStart)
+                            .padding(start = 10.dp, bottom = 10.dp),
+                        shape = RoundedCornerShape(999.dp),
+                        color = Color.Black.copy(alpha = 0.62f),
+                        border = BorderStroke(1.dp, Color.White.copy(alpha = 0.12f)),
+                        onClick = {
+                            focusManager.clearFocus(force = true)
+                            keyboardController?.hide()
+                            onOpenContacts()
+                        }
+                    ) {
+                        Row(
+                            modifier = Modifier.padding(horizontal = 10.dp, vertical = 7.dp),
+                            horizontalArrangement = Arrangement.spacedBy(6.dp),
+                            verticalAlignment = Alignment.CenterVertically
+                        ) {
+                            Icon(
+                                imageVector = SplitFeatureIcons.Contacts,
+                                contentDescription = null,
+                                tint = Color.White.copy(alpha = 0.84f),
+                                modifier = Modifier.size(14.dp)
+                            )
+                            Text(
+                                text = "Contacts",
+                                style = MaterialTheme.typography.bodySmall,
+                                fontWeight = FontWeight.SemiBold,
+                                color = Color.White.copy(alpha = 0.84f)
+                            )
+                        }
+                    }
+
+                    Surface(
+                        modifier = Modifier
+                            .align(Alignment.BottomEnd)
+                            .padding(end = 10.dp, bottom = 10.dp),
+                        shape = RoundedCornerShape(999.dp),
+                        color = Color.Black.copy(alpha = 0.62f),
+                        border = BorderStroke(1.dp, Color.White.copy(alpha = 0.12f)),
+                        onClick = {
+                            focusManager.clearFocus(force = true)
+                            keyboardController?.hide()
+                            onPasteClipboard()
+                        }
+                    ) {
+                        Row(
+                            modifier = Modifier.padding(horizontal = 10.dp, vertical = 7.dp),
+                            horizontalArrangement = Arrangement.spacedBy(6.dp),
+                            verticalAlignment = Alignment.CenterVertically
+                        ) {
+                            Icon(
+                                imageVector = Icons.Rounded.ContentPaste,
+                                contentDescription = null,
+                                tint = Color.White.copy(alpha = 0.84f),
+                                modifier = Modifier.size(14.dp)
+                            )
+                            Text(
+                                text = "Paste",
+                                style = MaterialTheme.typography.bodySmall,
+                                fontWeight = FontWeight.SemiBold,
+                                color = Color.White.copy(alpha = 0.84f)
+                            )
+                        }
+                    }
+                }
             }
 
             Column(verticalArrangement = Arrangement.spacedBy(12.dp)) {
@@ -843,6 +1118,7 @@ private fun WalletSendEntryStage(
                 Text(
                     text = when {
                         isAmountLocked -> "This request includes a fixed amount."
+                        isAmountlessInvoice -> "This blank Lightning invoice needs an amount before you can pay it."
                         isSendMaxAmount -> "Max uses your available balance. Fees are deducted from that amount."
                         amountUnit == SendAmountUnit.USD && isLoadingBtcPrice ->
                             "Loading the current BTC/USD rate..."
@@ -1117,133 +1393,46 @@ private fun WalletSendQuickAmountChip(
 @Composable
 private fun WalletSendScanStage(
     isPreparing: Boolean,
-    statusMessage: String?,
+    scanStatusMessage: String?,
     onCodeScanned: (String) -> Unit,
-    onPasteFromClipboard: () -> Unit
+    onImageSelected: (Uri) -> Unit,
+    onDismiss: () -> Unit
 ) {
-    Box {
-        WalletFlowCard {
-            Column(
-                modifier = Modifier.fillMaxWidth(),
-                horizontalAlignment = Alignment.CenterHorizontally,
-                verticalArrangement = Arrangement.spacedBy(24.dp)
-            ) {
-                Column(
-                    horizontalAlignment = Alignment.CenterHorizontally,
-                    verticalArrangement = Arrangement.spacedBy(8.dp)
-                ) {
-                    Text(
-                        text = "Scan a QR code",
-                        style = MaterialTheme.typography.headlineSmall,
-                        fontWeight = FontWeight.Bold,
-                        color = Color.White
-                    )
-
-                    Text(
-                        text = "We'll open a payment or contact flow from a scanned QR code or pasted request.",
-                        style = MaterialTheme.typography.bodyMedium,
-                        color = Color.White.copy(alpha = 0.72f),
-                        textAlign = TextAlign.Center
-                    )
-                }
-
-                Box(
-                    modifier = Modifier
-                        .fillMaxWidth()
-                        .aspectRatio(1f)
-                        .clip(RoundedCornerShape(20.dp))
-                        .background(Color.Black)
-                ) {
-                    SplitQrScannerView(
-                        modifier = Modifier.fillMaxSize(),
-                        onCodeScanned = onCodeScanned
-                    )
-
-                    Box(
-                        modifier = Modifier
-                            .fillMaxSize()
-                            .border(
-                                width = 1.dp,
-                                color = Color.White.copy(alpha = 0.25f),
-                                shape = RoundedCornerShape(20.dp)
-                            )
-                    )
-
-                    Box(
-                        modifier = Modifier
-                            .align(Alignment.Center)
-                            .clip(RoundedCornerShape(20.dp))
-                            .background(Color.Black.copy(alpha = 0.25f))
-                            .padding(horizontal = 20.dp, vertical = 18.dp)
-                    ) {
-                        Column(
-                            horizontalAlignment = Alignment.CenterHorizontally,
-                            verticalArrangement = Arrangement.spacedBy(12.dp)
-                        ) {
-                            Icon(
-                                imageVector = SplitFeatureIcons.QrCodeScan,
-                                contentDescription = null,
-                                tint = Color.White.copy(alpha = 0.90f),
-                                modifier = Modifier.size(40.dp)
-                            )
-
-                            Text(
-                                text = "Align the QR code inside the frame",
-                                style = MaterialTheme.typography.bodyLarge,
-                                color = Color.White,
-                                textAlign = TextAlign.Center
-                            )
-
-                            Text(
-                                text = "Scan a payment QR or Split contact QR.",
-                                style = MaterialTheme.typography.bodySmall,
-                                color = Color.White.copy(alpha = 0.74f),
-                                textAlign = TextAlign.Center
-                            )
-                        }
-                    }
-                }
-
-                Surface(
-                    modifier = Modifier.fillMaxWidth(),
-                    onClick = onPasteFromClipboard,
-                    shape = RoundedCornerShape(14.dp),
-                    color = Color(0xFF1A1A1F),
-                    border = BorderStroke(1.dp, Color.White.copy(alpha = 0.10f))
-                ) {
-                    Row(
-                        modifier = Modifier.padding(horizontal = 16.dp, vertical = 14.dp),
-                        horizontalArrangement = Arrangement.Center,
-                        verticalAlignment = Alignment.CenterVertically
-                    ) {
-                        Icon(
-                            imageVector = Icons.Rounded.ContentCopy,
-                            contentDescription = null,
-                            tint = Color.White
-                        )
-                        Spacer(modifier = Modifier.size(8.dp))
-                        Text(
-                            text = "Paste from clipboard",
-                            style = MaterialTheme.typography.bodyMedium,
-                            color = Color.White,
-                            fontWeight = FontWeight.SemiBold
-                        )
-                    }
-                }
-
-                if (!statusMessage.isNullOrBlank()) {
-                    Text(
-                        text = statusMessage,
-                        style = MaterialTheme.typography.bodySmall,
-                        color = SplitBrandPink,
-                        textAlign = TextAlign.Center
-                    )
-                }
-            }
+    val imagePicker = rememberLauncherForActivityResult(
+        contract = ActivityResultContracts.GetContent()
+    ) { uri ->
+        if (uri != null) {
+            onImageSelected(uri)
         }
+    }
 
-        if (isPreparing) {
-            WalletPrepareLoadingOverlay()
+    Box(modifier = Modifier.fillMaxSize()) {
+        SplitFullScreenQrScanner(
+            onClose = onDismiss,
+            onCodeScanned = onCodeScanned,
+            isProcessing = isPreparing,
+            onChooseImage = { imagePicker.launch("image/*") }
+        )
+
+        if (!scanStatusMessage.isNullOrBlank()) {
+            Surface(
+                modifier = Modifier
+                    .align(Alignment.BottomCenter)
+                    .navigationBarsPadding()
+                    .padding(horizontal = 24.dp, vertical = 24.dp)
+                    .fillMaxWidth(),
+                color = Color.Black.copy(alpha = 0.72f),
+                shape = RoundedCornerShape(18.dp),
+                border = BorderStroke(1.dp, Color.White.copy(alpha = 0.12f))
+            ) {
+                Text(
+                    text = scanStatusMessage,
+                    style = MaterialTheme.typography.bodyMedium,
+                    color = Color.White.copy(alpha = 0.86f),
+                    textAlign = TextAlign.Center,
+                    modifier = Modifier.padding(horizontal = 16.dp, vertical = 12.dp)
+                )
+            }
         }
     }
 }
@@ -1378,6 +1567,11 @@ private fun WalletSendReviewStage(
             )
         }
 
+        RewardsEligibilityPill(
+            rewardEligible = preview.rewardEligible == true,
+            modifier = Modifier.align(Alignment.Start)
+        )
+
         if (!errorMessage.isNullOrBlank()) {
             Text(
                 text = errorMessage,
@@ -1412,6 +1606,33 @@ private fun WalletSendReviewStage(
             color = Color.White.copy(alpha = 0.62f),
             textAlign = TextAlign.Center,
             modifier = Modifier.fillMaxWidth()
+        )
+    }
+}
+
+@Composable
+private fun RewardsEligibilityPill(
+    rewardEligible: Boolean,
+    modifier: Modifier = Modifier
+) {
+    Surface(
+        modifier = modifier,
+        shape = RoundedCornerShape(999.dp),
+        color = if (rewardEligible) SplitBrandPink else Color.Black,
+        border = BorderStroke(1.dp, Color.White.copy(alpha = 0.10f))
+    ) {
+        Text(
+            text = if (rewardEligible) {
+                "Reward payment."
+            } else {
+                "Payment not eligible for rewards."
+            },
+            style = MaterialTheme.typography.labelMedium,
+            fontWeight = FontWeight.SemiBold,
+            color = Color.White,
+            maxLines = 2,
+            overflow = TextOverflow.Ellipsis,
+            modifier = Modifier.padding(horizontal = 12.dp, vertical = 7.dp)
         )
     }
 }
@@ -1516,6 +1737,7 @@ fun WalletReceiveScreen(
     var usdAmountText by rememberSaveable { mutableStateOf("") }
     var satsAmountText by rememberSaveable { mutableStateOf("") }
     var descriptionText by rememberSaveable { mutableStateOf("") }
+    var isAmountlessInvoice by rememberSaveable { mutableStateOf(false) }
     var invoiceInfo by remember { mutableStateOf<ReceiveInvoicePresentation?>(null) }
     var errorMessage by remember { mutableStateOf<String?>(null) }
     var isGenerating by remember { mutableStateOf(false) }
@@ -1550,88 +1772,182 @@ fun WalletReceiveScreen(
                 }
             )
         } else {
-            WalletFlowCard {
-                Column(verticalArrangement = Arrangement.spacedBy(14.dp)) {
-                    Text(
-                        text = "Amount in USD",
-                        style = MaterialTheme.typography.titleLarge,
-                        fontWeight = FontWeight.Bold,
-                        color = Color.White
-                    )
+            Column(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .padding(top = 4.dp),
+                verticalArrangement = Arrangement.spacedBy(16.dp)
+            ) {
+                    if (!isAmountlessInvoice) {
+                        ReceiveFieldLabel("Amount in USD")
 
-                    TextField(
-                        value = usdAmountText,
-                        onValueChange = { updated ->
-                            val sanitized = ReceiveAmountCalculator.sanitizeUsdInput(updated)
-                            usdAmountText = sanitized
-                            if (isProgrammaticAmountUpdate) return@TextField
+                        ReceiveRoundedTextField(
+                            value = usdAmountText,
+                            onValueChange = { updated ->
+                                val sanitized = ReceiveAmountCalculator.sanitizeUsdInput(updated)
+                                usdAmountText = sanitized
+                                if (isProgrammaticAmountUpdate) return@ReceiveRoundedTextField
 
-                            isProgrammaticAmountUpdate = true
-                            satsAmountText = ReceiveAmountCalculator.satsTextFromUsdInput(
-                                usdInput = sanitized,
-                                btcUsdRate = btcUsdRate
-                            ).orEmpty()
-                            isProgrammaticAmountUpdate = false
-                        },
-                        modifier = Modifier.fillMaxWidth(),
-                        label = { Text("USD amount") },
-                        keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Decimal),
-                        supportingText = {
-                            Text("Enter the USD amount you want to request.")
-                        }
-                    )
-
-                    TextField(
-                        value = satsAmountText,
-                        onValueChange = { updated ->
-                            val sanitized = ReceiveAmountCalculator.sanitizeSatsInput(updated)
-                            satsAmountText = sanitized
-                            if (isProgrammaticAmountUpdate) return@TextField
-
-                            isProgrammaticAmountUpdate = true
-                            usdAmountText = ReceiveAmountCalculator.usdTextFromSatsInput(
-                                satsInput = sanitized,
-                                btcUsdRate = btcUsdRate
-                            ).orEmpty()
-                            isProgrammaticAmountUpdate = false
-                        },
-                        modifier = Modifier.fillMaxWidth(),
-                        label = { Text("Sats amount") },
-                        keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Number),
-                        supportingText = {
-                            Text("Sats amount is estimated from USD using the current BTC/USD rate.")
-                        }
-                    )
-
-                    if (isLoadingBtcPrice) {
-                        Text(
-                            text = "Loading the current BTC/USD rate...",
-                            style = MaterialTheme.typography.bodySmall,
-                            color = Color.White.copy(alpha = 0.64f)
+                                isProgrammaticAmountUpdate = true
+                                satsAmountText = ReceiveAmountCalculator.satsTextFromUsdInput(
+                                    usdInput = sanitized,
+                                    btcUsdRate = btcUsdRate
+                                ).orEmpty()
+                                isProgrammaticAmountUpdate = false
+                            },
+                            placeholder = "0.00",
+                            keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Decimal),
+                            textStyle = MaterialTheme.typography.titleLarge.copy(
+                                color = Color.White,
+                                fontWeight = FontWeight.Medium
+                            ),
+                            prefix = {
+                                Text(
+                                    text = "$",
+                                    style = MaterialTheme.typography.titleLarge,
+                                    color = Color.White,
+                                    fontWeight = FontWeight.Medium
+                                )
+                            }
                         )
-                    } else if (btcUsdRate == null) {
+
+                        Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                            ReceiveFieldLabel("Sats amount")
+
+                            ReceiveRoundedTextField(
+                                value = satsAmountText,
+                                onValueChange = { updated ->
+                                    val sanitized = ReceiveAmountCalculator.sanitizeSatsInput(updated)
+                                    satsAmountText = sanitized
+                                    if (isProgrammaticAmountUpdate) return@ReceiveRoundedTextField
+
+                                    isProgrammaticAmountUpdate = true
+                                    usdAmountText = ReceiveAmountCalculator.usdTextFromSatsInput(
+                                        satsInput = sanitized,
+                                        btcUsdRate = btcUsdRate
+                                    ).orEmpty()
+                                    isProgrammaticAmountUpdate = false
+                                },
+                                placeholder = "1000",
+                                keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Number),
+                                textStyle = MaterialTheme.typography.bodyLarge.copy(
+                                    color = Color.White,
+                                    fontWeight = FontWeight.Medium
+                                )
+                            )
+                        }
+
+                        if (isLoadingBtcPrice) {
+                            Text(
+                                text = "Loading the current BTC/USD rate...",
+                                style = MaterialTheme.typography.bodySmall,
+                                color = Color.White.copy(alpha = 0.64f)
+                            )
+                        } else if (btcUsdRate == null) {
+                            Text(
+                                text = "Unable to load the current BTC/USD rate. Please try again.",
+                                style = MaterialTheme.typography.bodySmall,
+                                color = SplitBrandPink
+                            )
+                        }
+                    }
+
+                    Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                        ReceiveFieldLabel("Description (optional)")
+
+                        ReceiveRoundedTextField(
+                            value = descriptionText,
+                            onValueChange = { descriptionText = it.take(80) },
+                            placeholder = "Optional",
+                            keyboardOptions = KeyboardOptions.Default,
+                            singleLine = false,
+                            minLines = 1,
+                            maxLines = 3,
+                            textStyle = MaterialTheme.typography.bodyLarge.copy(
+                                color = Color.White,
+                                fontWeight = FontWeight.Medium
+                            )
+                        )
+
                         Text(
-                            text = "Unable to load the current BTC/USD rate. Please try again.",
+                            text = "Keep it short. This text is embedded in the invoice and may be visible to the sender.",
                             style = MaterialTheme.typography.bodySmall,
-                            color = SplitBrandPink
+                            color = Color.White.copy(alpha = 0.62f),
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .clip(RoundedCornerShape(14.dp))
+                                .background(Color.White.copy(alpha = 0.05f))
+                                .padding(10.dp)
                         )
                     }
 
-                    TextField(
-                        value = descriptionText,
-                        onValueChange = { descriptionText = it },
+                    Surface(
                         modifier = Modifier.fillMaxWidth(),
-                        label = { Text("Description (optional)") },
-                        supportingText = {
-                            Text("Keep it short. This text is embedded in the invoice and may be visible to the sender.")
+                        shape = RoundedCornerShape(14.dp),
+                        color = Color.White.copy(alpha = 0.06f),
+                        border = BorderStroke(1.dp, Color.White.copy(alpha = 0.08f)),
+                        onClick = {
+                            isAmountlessInvoice = !isAmountlessInvoice
+                            if (isAmountlessInvoice) {
+                                usdAmountText = ""
+                                satsAmountText = ""
+                                errorMessage = null
+                            }
                         }
-                    )
+                    ) {
+                        Row(
+                            modifier = Modifier.padding(horizontal = 14.dp, vertical = 12.dp),
+                            horizontalArrangement = Arrangement.spacedBy(12.dp),
+                            verticalAlignment = Alignment.CenterVertically
+                        ) {
+                            Text(
+                                text = "Create a blank Lightning invoice",
+                                modifier = Modifier.weight(1f),
+                                style = MaterialTheme.typography.titleSmall,
+                                fontWeight = FontWeight.Bold,
+                                color = Color.White
+                            )
+
+                            Box(
+                                modifier = Modifier
+                                    .size(24.dp)
+                                    .clip(CircleShape)
+                                    .background(
+                                        if (isAmountlessInvoice) {
+                                            SplitBrandBlue
+                                        } else {
+                                            Color.Transparent
+                                        }
+                                    )
+                                    .border(
+                                        width = 2.dp,
+                                        color = if (isAmountlessInvoice) {
+                                            SplitBrandBlue
+                                        } else {
+                                            Color.White.copy(alpha = 0.45f)
+                                        },
+                                        shape = CircleShape
+                                    ),
+                                contentAlignment = Alignment.Center
+                            ) {
+                                if (isAmountlessInvoice) {
+                                    Box(
+                                        modifier = Modifier
+                                            .size(8.dp)
+                                            .clip(CircleShape)
+                                            .background(Color.White)
+                                    )
+                                }
+                            }
+                        }
+                    }
 
                     if (!errorMessage.isNullOrBlank()) {
                         Text(
                             text = errorMessage!!,
-                            style = MaterialTheme.typography.bodyMedium,
-                            color = SplitBrandPink
+                            style = MaterialTheme.typography.bodySmall,
+                            color = SplitBrandPink,
+                            modifier = Modifier.fillMaxWidth()
                         )
                     }
 
@@ -1640,11 +1956,19 @@ fun WalletReceiveScreen(
                             scope.launch {
                                 isGenerating = true
                                 errorMessage = null
-                                val amountSats = ReceiveAmountCalculator.parseAmountSats(satsAmountText)
-                                val amountUsd = ReceiveAmountCalculator.parseAmountUsd(usdAmountText)
+                                val amountSats = if (isAmountlessInvoice) {
+                                    null
+                                } else {
+                                    ReceiveAmountCalculator.parseAmountSats(satsAmountText)
+                                }
+                                val amountUsd = if (isAmountlessInvoice) {
+                                    null
+                                } else {
+                                    ReceiveAmountCalculator.parseAmountUsd(usdAmountText)
+                                }
                                 runCatching {
                                     rootViewModel.createBolt11Invoice(
-                                        amountSats = amountSats ?: 0L,
+                                        amountSats = amountSats,
                                         description = descriptionText
                                             .trim()
                                             .ifBlank { "Split payment" }
@@ -1652,7 +1976,7 @@ fun WalletReceiveScreen(
                                 }.onSuccess { invoice ->
                                     invoiceInfo = ReceiveInvoicePresentation(
                                         invoice = invoice,
-                                        amountUsd = amountUsd ?: 0.0,
+                                        amountUsd = amountUsd,
                                         amountSats = amountSats ?: 0L
                                     )
                                 }.onFailure { error ->
@@ -1661,12 +1985,25 @@ fun WalletReceiveScreen(
                                 isGenerating = false
                             }
                         },
-                        modifier = Modifier.fillMaxWidth(),
-                        enabled = !isGenerating &&
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .height(56.dp),
+                        enabled = if (isAmountlessInvoice) {
+                            !isGenerating
+                        } else {
+                            !isGenerating &&
                             !isLoadingBtcPrice &&
                             btcUsdRate != null &&
                             (ReceiveAmountCalculator.parseAmountUsd(usdAmountText) ?: 0.0) > 0.0 &&
                             (ReceiveAmountCalculator.parseAmountSats(satsAmountText) ?: 0L) > 0L
+                        },
+                        shape = RoundedCornerShape(18.dp),
+                        colors = ButtonDefaults.buttonColors(
+                            containerColor = Color.White,
+                            contentColor = Color.Black,
+                            disabledContainerColor = Color.White.copy(alpha = 0.30f),
+                            disabledContentColor = Color.Black.copy(alpha = 0.52f)
+                        )
                     ) {
                         if (isGenerating) {
                             CircularProgressIndicator(
@@ -1678,21 +2015,87 @@ fun WalletReceiveScreen(
                             Text("Confirm")
                         }
                     }
-
-                    Text(
-                        text = "After confirming, you'll see a QR code and Lightning invoice you can share with the payer.",
-                        style = MaterialTheme.typography.bodySmall,
-                        color = Color.White.copy(alpha = 0.64f)
-                    )
                 }
-            }
         }
     }
 }
 
+@Composable
+private fun ReceiveFieldLabel(text: String) {
+    Text(
+        text = text,
+        style = MaterialTheme.typography.bodySmall,
+        color = Color.White.copy(alpha = 0.62f)
+    )
+}
+
+@Composable
+private fun ReceiveRoundedTextField(
+    value: String,
+    onValueChange: (String) -> Unit,
+    placeholder: String,
+    keyboardOptions: KeyboardOptions,
+    modifier: Modifier = Modifier,
+    singleLine: Boolean = true,
+    minLines: Int = 1,
+    maxLines: Int = 1,
+    textStyle: TextStyle = MaterialTheme.typography.bodyLarge.copy(
+        color = Color.White,
+        fontWeight = FontWeight.Medium
+    ),
+    prefix: (@Composable () -> Unit)? = null
+) {
+    val shape = RoundedCornerShape(14.dp)
+    TextField(
+        value = value,
+        onValueChange = onValueChange,
+        modifier = modifier
+            .fillMaxWidth()
+            .border(
+                width = 1.dp,
+                color = Color.White.copy(alpha = 0.08f),
+                shape = shape
+            ),
+        placeholder = {
+            Text(
+                text = placeholder,
+                color = Color.White.copy(alpha = 0.28f)
+            )
+        },
+        prefix = prefix,
+        keyboardOptions = keyboardOptions,
+        singleLine = singleLine,
+        minLines = minLines,
+        maxLines = maxLines,
+        colors = receiveFieldColors(),
+        shape = shape,
+        textStyle = textStyle
+    )
+}
+
+@Composable
+private fun receiveFieldColors() = TextFieldDefaults.colors(
+    focusedContainerColor = Color.White.copy(alpha = 0.06f),
+    unfocusedContainerColor = Color.White.copy(alpha = 0.06f),
+    disabledContainerColor = Color.White.copy(alpha = 0.06f),
+    focusedTextColor = Color.White,
+    unfocusedTextColor = Color.White,
+    disabledTextColor = Color.White.copy(alpha = 0.62f),
+    cursorColor = Color.White,
+    focusedIndicatorColor = Color.Transparent,
+    unfocusedIndicatorColor = Color.Transparent,
+    disabledIndicatorColor = Color.Transparent,
+    focusedPlaceholderColor = Color.White.copy(alpha = 0.28f),
+    unfocusedPlaceholderColor = Color.White.copy(alpha = 0.28f),
+    disabledPlaceholderColor = Color.White.copy(alpha = 0.20f),
+    focusedPrefixColor = Color.White,
+    unfocusedPrefixColor = Color.White,
+    disabledPrefixColor = Color.White.copy(alpha = 0.62f)
+)
+
 private data class ReceiveInvoicePresentation(
     val invoice: ReceiveInvoice,
-    val amountUsd: Double,
+    val amountUsd: Double?,
     val amountSats: Long
 )
 
@@ -1730,11 +2133,13 @@ private fun WalletReceiveInvoiceStage(
             ) {
                 WalletReceiveDetailRow(
                     label = "Amount",
-                    value = ReceiveAmountCalculator.formatUsdDisplay(invoiceInfo.amountUsd)
+                    value = invoiceInfo.amountUsd?.let(ReceiveAmountCalculator::formatUsdDisplay)
+                        ?: "Payer chooses"
                 )
                 WalletReceiveDetailRow(
                     label = "Sats",
-                    value = formatSats(invoiceInfo.amountSats)
+                    value = invoiceInfo.amountSats.takeIf { it > 0L }?.let(::formatSats)
+                        ?: "Payer chooses"
                 )
             }
         }

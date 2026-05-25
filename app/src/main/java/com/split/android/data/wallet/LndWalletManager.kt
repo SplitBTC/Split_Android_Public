@@ -14,6 +14,13 @@ import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.withContext
+import java.net.ConnectException
+import java.net.Inet4Address
+import java.net.Inet6Address
+import java.net.InetAddress
+import java.net.SocketTimeoutException
+import java.net.UnknownHostException
 import java.util.Locale
 import kotlin.math.max
 
@@ -49,6 +56,9 @@ class LndWalletManager(
     private val _walletEventVersion = MutableStateFlow(0L)
     val walletEventVersion: StateFlow<Long> = _walletEventVersion.asStateFlow()
 
+    private val _storedNodesVersion = MutableStateFlow(0L)
+    val storedNodesVersion: StateFlow<Long> = _storedNodesVersion.asStateFlow()
+
     var lastErrorMessage: String? = null
         private set
 
@@ -66,25 +76,32 @@ class LndWalletManager(
         return _connectedNode.value?.displayName ?: "LND Node"
     }
 
-    suspend fun connect(lndConnectString: String): LndNodeCredentials {
+    suspend fun connect(
+        lndConnectString: String,
+        label: String? = null
+    ): LndNodeCredentials {
         lastErrorMessage = null
         _state.value = LndConnectionState.Connecting
 
         return runCatching {
             val parsedCredentials = LndConnectParser.parse(lndConnectString)
             val (workingCredentials, info) = firstWorkingClient(parsedCredentials.restConnectionCandidates)
-            val verifiedCredentials = workingCredentials.verified(info)
+            val verifiedCredentials = workingCredentials
+                .verified(info)
+                .copy(label = label?.trim()?.ifBlank { null } ?: workingCredentials.label)
 
-            credentialStore.saveNode(verifiedCredentials, makeActive = true)
-            client = LndRestClient(verifiedCredentials)
-            _connectedNode.value = verifiedCredentials
+            val savedCredentials = credentialStore.saveNode(verifiedCredentials, makeActive = true)
+            client = LndRestClient(savedCredentials)
+            _connectedNode.value = savedCredentials
             _state.value = LndConnectionState.Ready
+            notifyStoredNodesChanged()
 
             runCatching { refreshBalance() }
             startInvoiceEventListenerIfPossible()
-            verifiedCredentials
+            savedCredentials
         }.getOrElse { error ->
-            val message = error.message ?: "Unable to connect to LND node."
+            val host = runCatching { LndConnectParser.parse(lndConnectString).host }.getOrNull()
+            val message = connectionErrorMessage(error, host)
             lastErrorMessage = message
             _state.value = LndConnectionState.Error(message)
             throw error
@@ -101,22 +118,35 @@ class LndWalletManager(
             throw LndWalletException.NoStoredNode
         }
 
+        try {
+            validateConnectionCandidate(storedNode)
+        } catch (error: Throwable) {
+            stopInvoiceEventListener()
+            client = null
+            _balanceSummary.value = null
+            _connectedNode.value = storedNode
+            val message = connectionErrorMessage(error, storedNode.host)
+            lastErrorMessage = message
+            _state.value = LndConnectionState.Error(message)
+            throw error
+        }
+
         _state.value = LndConnectionState.Connecting
         val restClient = LndRestClient(storedNode)
 
         runCatching {
             val info = restClient.getInfo()
-            val verifiedNode = storedNode.verified(info)
-            credentialStore.saveNode(verifiedNode, makeActive = true)
+            val verifiedNode = credentialStore.saveNode(storedNode.verified(info), makeActive = true)
 
             client = LndRestClient(verifiedNode)
             _connectedNode.value = verifiedNode
             _state.value = LndConnectionState.Ready
+            notifyStoredNodesChanged()
 
             runCatching { refreshBalance() }
             startInvoiceEventListenerIfPossible()
         }.onFailure { error ->
-            val message = error.message ?: "Unable to restore LND node."
+            val message = connectionErrorMessage(error, storedNode.host)
             lastErrorMessage = message
             _connectedNode.value = storedNode
             client = restClient
@@ -143,6 +173,7 @@ class LndWalletManager(
             .remove(cursorKey(id))
             .apply()
         credentialStore.deleteNode(id)
+        notifyStoredNodesChanged()
         onWalletActivity()
     }
 
@@ -153,21 +184,35 @@ class LndWalletManager(
     suspend fun setActiveStoredNode(id: String) {
         credentialStore.setActiveNode(id)
         restoreActiveNode()
+        notifyStoredNodesChanged()
     }
 
     suspend fun refreshNodeInfo(): LndGetInfoResponse {
+        ensureTorForActiveNodeIfNeeded()
         val restClient = requireClient()
         val info = restClient.getInfo()
         _connectedNode.value?.let { current ->
-            val verified = current.verified(info)
-            credentialStore.saveNode(verified, makeActive = true)
+            val verified = credentialStore.saveNode(current.verified(info), makeActive = true)
             _connectedNode.value = verified
+            notifyStoredNodesChanged()
         }
         _state.value = LndConnectionState.Ready
         return info
     }
 
+    fun renameNode(id: String, label: String) {
+        credentialStore.renameNode(id, label)
+        _connectedNode.value?.let { current ->
+            if (current.id == id) {
+                _connectedNode.value = current.copy(label = label.trim().ifBlank { current.label })
+            }
+        }
+        notifyStoredNodesChanged()
+        onWalletActivity()
+    }
+
     suspend fun refreshBalance(): LndBalanceSummary {
+        ensureTorForActiveNodeIfNeeded()
         val restClient = requireClient()
         val channelBalance = restClient.channelBalance()
         val walletBalance = restClient.walletBalance()
@@ -181,6 +226,7 @@ class LndWalletManager(
     }
 
     suspend fun decodeInvoice(bolt11: String): LndDecodePayReqResponse {
+        ensureTorForActiveNodeIfNeeded()
         return requireClient().decodePayReq(bolt11)
     }
 
@@ -188,6 +234,7 @@ class LndWalletManager(
         bolt11: String,
         amountSats: Long?
     ): LndPayInvoiceResponse {
+        ensureTorForActiveNodeIfNeeded()
         val response = requireClient().payInvoice(
             bolt11 = bolt11,
             amountSats = amountSats
@@ -207,6 +254,7 @@ class LndWalletManager(
         destinationPubkey: String,
         amountSats: Long
     ): Long {
+        ensureTorForActiveNodeIfNeeded()
         return requireClient().estimateRouteFee(
             destinationPubkey = destinationPubkey,
             amountSats = amountSats
@@ -218,6 +266,7 @@ class LndWalletManager(
         memo: String?,
         expirySecs: Long = 3_600L
     ): LndAddInvoiceResponse {
+        ensureTorForActiveNodeIfNeeded()
         return requireClient().addInvoice(
             amountSats = amountSats,
             memo = memo,
@@ -226,14 +275,17 @@ class LndWalletManager(
     }
 
     suspend fun signNodeMessage(message: String): LndSignMessageResponse {
+        ensureTorForActiveNodeIfNeeded()
         return requireClient().signMessage(message)
     }
 
     suspend fun listPayments(maxPayments: Int = 50): List<LndPayment> {
+        ensureTorForActiveNodeIfNeeded()
         return requireClient().listPayments(maxPayments)
     }
 
     suspend fun listInvoices(maxInvoices: Int = 50): List<LndInvoice> {
+        ensureTorForActiveNodeIfNeeded()
         return requireClient().listInvoices(maxInvoices)
     }
 
@@ -305,6 +357,7 @@ class LndWalletManager(
     }
 
     suspend fun fetchTransactionRows(maxCount: Int = 100): List<WalletTransactionRow> = coroutineScope {
+        ensureTorForActiveNodeIfNeeded()
         val restClient = requireClient()
         val paymentsDeferred = async { restClient.listPayments(maxCount) }
         val invoicesDeferred = async { restClient.listInvoices(maxCount) }
@@ -356,6 +409,17 @@ class LndWalletManager(
         return client ?: throw LndWalletException.NodeNotConnected
     }
 
+    private fun notifyStoredNodesChanged() {
+        _storedNodesVersion.value += 1
+    }
+
+    private suspend fun ensureTorForActiveNodeIfNeeded() {
+        val node = _connectedNode.value ?: credentialStore.activeNode()
+        if (node?.usesTor == true) {
+            RemoteNodeTorTransport.ensureStarted(appContext)
+        }
+    }
+
     private suspend fun firstWorkingClient(
         candidates: List<LndNodeCredentials>
     ): Pair<LndNodeCredentials, LndGetInfoResponse> {
@@ -363,10 +427,13 @@ class LndWalletManager(
 
         for (candidate in candidates) {
             try {
+                validateConnectionCandidate(candidate)
+                val connectTimeoutMillis = if (candidate.usesTor) 20_000 else 6_000
+                val readTimeoutMillis = if (candidate.usesTor) 45_000 else 10_000
                 val restClient = LndRestClient(
                     credentials = candidate,
-                    connectTimeoutMillis = 6_000,
-                    readTimeoutMillis = 10_000
+                    connectTimeoutMillis = connectTimeoutMillis,
+                    readTimeoutMillis = readTimeoutMillis
                 )
                 val info = restClient.getInfo()
                 return candidate to info
@@ -376,6 +443,42 @@ class LndWalletManager(
         }
 
         throw lastError ?: LndWalletException.InvalidResponse
+    }
+
+    private suspend fun validateConnectionCandidate(candidate: LndNodeCredentials) {
+        LndHostAccessPolicy.validateHost(candidate.host)
+        if (candidate.usesTor) {
+            RemoteNodeTorTransport.ensureStarted(appContext)
+            return
+        }
+        val resolvedAddresses = LndHostResolver.resolve(candidate.host)
+        LndHostAccessPolicy.validateResolvedAddresses(resolvedAddresses)
+    }
+
+    private fun connectionErrorMessage(error: Throwable, host: String?): String {
+        val normalizedHost = host?.trim()?.lowercase(Locale.US)
+
+        return when (error) {
+            is UnknownHostException -> {
+                if (normalizedHost?.endsWith(".onion") == true) {
+                    "Split could not reach this Tor onion LND node. Make sure Tor is running and the onion service address is correct."
+                } else if (normalizedHost?.endsWith(".local") == true) {
+                    "Split could not resolve this .local hostname. Make sure your phone is on the same local network as the node."
+                } else {
+                    "Split could not resolve this node host. Make sure the node is reachable from this phone over your private network, Tailscale, or Tor."
+                }
+            }
+
+            is ConnectException, is SocketTimeoutException -> {
+                if (normalizedHost?.endsWith(".onion") == true) {
+                    "Split could not reach this Tor onion LND node. Make sure Tor is running, the onion service is online, and the REST port is reachable."
+                } else {
+                    "Split could not reach this node. Make sure the node is online and reachable from this phone over your private network, Tailscale, or Tor."
+                }
+            }
+
+            else -> error.message ?: "Unable to connect to LND node."
+        }
     }
 
     private fun stopInvoiceListenerJob() {
@@ -504,5 +607,34 @@ class LndWalletManager(
 
     private fun cursorKey(nodeId: String): String {
         return "split.lnd.invoiceListener.lastSettleIndex.${nodeId.lowercase(Locale.US)}"
+    }
+}
+
+private object LndHostResolver {
+    suspend fun resolve(host: String): List<LndResolvedAddress> = withContext(Dispatchers.IO) {
+        val trimmedHost = host.trim()
+        val resolvedAddresses = InetAddress.getAllByName(trimmedHost)
+            .mapNotNull { address ->
+                when (address) {
+                    is Inet4Address -> LndResolvedAddress.Ipv4(address)
+                    is Inet6Address -> LndResolvedAddress.Ipv6(address)
+                    else -> null
+                }
+            }
+            .distinctBy { address ->
+                when (address) {
+                    is LndResolvedAddress.Ipv4 -> "4:${address.address.hostAddress}"
+                    is LndResolvedAddress.Ipv6 -> {
+                        val normalizedHost = address.address.hostAddress?.substringBefore('%').orEmpty()
+                        "6:$normalizedHost"
+                    }
+                }
+            }
+
+        if (resolvedAddresses.isEmpty()) {
+            throw UnknownHostException(trimmedHost)
+        }
+
+        resolvedAddresses
     }
 }

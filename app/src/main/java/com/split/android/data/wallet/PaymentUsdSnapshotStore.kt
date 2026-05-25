@@ -12,7 +12,9 @@ data class PaymentUsdSnapshot(
     val usdValueAtTransaction: Double? = null,
     val btcUsdRateAtTransaction: Double? = null,
     val isReportable: Boolean = false,
-    val userLog: String? = null
+    val userLog: String? = null,
+    val destinationPubkey: String? = null,
+    val paymentHash: String? = null
 ) {
     val hasUsdSnapshot: Boolean
         get() = usdValueAtTransaction != null && btcUsdRateAtTransaction != null
@@ -25,7 +27,9 @@ data class PaymentUsdSnapshot(
             usdValueAtTransaction = snapshot.usdValueAtTransaction ?: usdValueAtTransaction,
             btcUsdRateAtTransaction = snapshot.btcUsdRateAtTransaction ?: btcUsdRateAtTransaction,
             isReportable = isReportable || snapshot.isReportable,
-            userLog = snapshot.userLog ?: userLog
+            userLog = snapshot.userLog ?: userLog,
+            destinationPubkey = snapshot.destinationPubkey ?: destinationPubkey,
+            paymentHash = snapshot.paymentHash ?: paymentHash
         )
     }
 
@@ -35,6 +39,16 @@ data class PaymentUsdSnapshot(
 
     fun withUserLog(userLog: String?): PaymentUsdSnapshot {
         return copy(userLog = normalizedUserLog(userLog))
+    }
+
+    fun withDestinationMetadata(
+        destinationPubkey: String?,
+        paymentHash: String?
+    ): PaymentUsdSnapshot {
+        return copy(
+            destinationPubkey = normalizedUserLog(destinationPubkey) ?: this.destinationPubkey,
+            paymentHash = normalizedUserLog(paymentHash) ?: this.paymentHash
+        )
     }
 
     companion object {
@@ -74,7 +88,9 @@ class PaymentUsdSnapshotStore(
                 usdValueAtTransaction = json.optNullableDouble("usdValueAtTransaction"),
                 btcUsdRateAtTransaction = json.optNullableDouble("btcUsdRateAtTransaction"),
                 isReportable = json.optBoolean("isReportable", false),
-                userLog = json.optNullableString("userLog")
+                userLog = json.optNullableString("userLog"),
+                destinationPubkey = json.optNullableString("destinationPubkey"),
+                paymentHash = json.optNullableString("paymentHash")
             )
         }.getOrNull()
     }
@@ -94,6 +110,23 @@ class PaymentUsdSnapshotStore(
     fun userLogs(walletPubkey: String, paymentIds: List<String>): Map<String, String> {
         return paymentIds.mapNotNull { paymentId ->
             snapshot(walletPubkey, paymentId)?.userLog?.let { paymentId to it }
+        }.toMap()
+    }
+
+    fun destinationMetadata(walletPubkey: String, paymentIds: List<String>): Map<String, PaymentDestinationMetadata> {
+        return paymentIds.mapNotNull { paymentId ->
+            snapshot(walletPubkey, paymentId)?.let { snapshot ->
+                val destinationPubkey = snapshot.destinationPubkey
+                val paymentHash = snapshot.paymentHash
+                if (destinationPubkey == null && paymentHash == null) {
+                    null
+                } else {
+                    paymentId to PaymentDestinationMetadata(
+                        destinationPubkey = destinationPubkey,
+                        paymentHash = paymentHash
+                    )
+                }
+            }
         }.toMap()
     }
 
@@ -171,6 +204,41 @@ class PaymentUsdSnapshotStore(
         }
     }
 
+    fun setDestinationMetadata(
+        walletPubkey: String,
+        paymentId: String,
+        paymentType: String,
+        destinationPubkey: String?,
+        paymentHash: String?
+    ) {
+        val normalizedDestinationPubkey = PaymentUsdSnapshot.normalizedUserLog(destinationPubkey)
+        val normalizedPaymentHash = PaymentUsdSnapshot.normalizedUserLog(paymentHash)
+        if (normalizedDestinationPubkey == null && normalizedPaymentHash == null) return
+
+        val updatedSnapshot = snapshot(walletPubkey, paymentId)
+            ?.withDestinationMetadata(
+                destinationPubkey = normalizedDestinationPubkey,
+                paymentHash = normalizedPaymentHash
+            )
+            ?: PaymentUsdSnapshot(
+                walletPubkey = walletPubkey,
+                paymentId = paymentId,
+                paymentType = paymentType,
+                destinationPubkey = normalizedDestinationPubkey,
+                paymentHash = normalizedPaymentHash
+            )
+
+        runCatching {
+            preferences().edit()
+                .putString(snapshotKey(walletPubkey, paymentId), jsonFor(updatedSnapshot).toString())
+                .apply()
+            storeUnavailable = false
+        }.onFailure { error ->
+            storeUnavailable = true
+            println("PaymentUsdSnapshotStore: failed to update secure snapshot destination metadata without deleting files. ${error.localizedMessage}")
+        }
+    }
+
     fun clearAll() {
         runCatching {
             preferences().edit().clear().apply()
@@ -178,6 +246,22 @@ class PaymentUsdSnapshotStore(
         }.onFailure { error ->
             storeUnavailable = true
             println("PaymentUsdSnapshotStore: failed to clear secure snapshot store without deleting files. ${error.localizedMessage}")
+        }
+    }
+
+    fun clearWallet(walletPubkey: String) {
+        val prefix = "payment_usd_snapshot::${walletPubkey.trim()}::"
+        runCatching {
+            val keys = preferences().all.keys.filter { it.startsWith(prefix) }
+            if (keys.isEmpty()) return
+
+            val editor = preferences().edit()
+            keys.forEach(editor::remove)
+            editor.apply()
+            storeUnavailable = false
+        }.onFailure { error ->
+            storeUnavailable = true
+            println("PaymentUsdSnapshotStore: failed to clear wallet snapshot data without deleting files. ${error.localizedMessage}")
         }
     }
 
@@ -206,12 +290,19 @@ class PaymentUsdSnapshotStore(
             .put("btcUsdRateAtTransaction", snapshot.btcUsdRateAtTransaction ?: JSONObject.NULL)
             .put("isReportable", snapshot.isReportable)
             .put("userLog", snapshot.userLog ?: JSONObject.NULL)
+            .put("destinationPubkey", snapshot.destinationPubkey ?: JSONObject.NULL)
+            .put("paymentHash", snapshot.paymentHash ?: JSONObject.NULL)
     }
 
     private companion object {
         const val FILE_NAME = "split_payment_usd_snapshots"
     }
 }
+
+data class PaymentDestinationMetadata(
+    val destinationPubkey: String?,
+    val paymentHash: String?
+)
 
 private fun JSONObject.optNullableDouble(key: String): Double? {
     if (!has(key) || isNull(key)) {

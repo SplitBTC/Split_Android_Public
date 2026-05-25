@@ -2,6 +2,7 @@ package com.split.android.data.messages
 
 import android.content.SharedPreferences
 import android.content.Context
+import com.split.android.core.AppConfig
 import com.split.android.data.security.openEncryptedPreferences
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
@@ -25,6 +26,7 @@ class MessageStore private constructor(
         _recipientMetadataByConversationId.asStateFlow()
 
     init {
+        migrateLegacyProdStoreIfNeeded()
         _messages.value = loadMessages()
         _recipientMetadataByConversationId.value = loadRecipientMetadata()
     }
@@ -403,9 +405,51 @@ class MessageStore private constructor(
         return synchronized(this) {
             preferences ?: openEncryptedPreferences(
                 context = appContext,
-                fileName = FILE_NAME,
+                fileName = preferredFileName(),
                 logTag = "MessageStore"
             ).also { preferences = it }
+        }
+    }
+
+    private fun migrateLegacyProdStoreIfNeeded() {
+        if (AppConfig.messagingPushEnvironment != "prod") {
+            return
+        }
+
+        runCatching {
+            val currentPreferences = preferences()
+            val hasCurrentMessages = currentPreferences.getString(KEY_MESSAGES_JSON, null)
+                ?.trim()
+                ?.isNotEmpty() == true
+            val hasCurrentMetadata = currentPreferences.getString(KEY_RECIPIENT_METADATA_JSON, null)
+                ?.trim()
+                ?.isNotEmpty() == true
+            if (hasCurrentMessages || hasCurrentMetadata) {
+                return
+            }
+
+            val legacyPreferences = openEncryptedPreferences(
+                context = appContext,
+                fileName = FILE_NAME,
+                logTag = "MessageStore"
+            )
+            val legacyMessages = legacyPreferences.getString(KEY_MESSAGES_JSON, null)
+                ?.trim()
+                ?.takeIf { it.isNotEmpty() }
+            val legacyMetadata = legacyPreferences.getString(KEY_RECIPIENT_METADATA_JSON, null)
+                ?.trim()
+                ?.takeIf { it.isNotEmpty() }
+            if (legacyMessages == null && legacyMetadata == null) {
+                return
+            }
+
+            val editor = currentPreferences.edit()
+            legacyMessages?.let { editor.putString(KEY_MESSAGES_JSON, it) }
+            legacyMetadata?.let { editor.putString(KEY_RECIPIENT_METADATA_JSON, it) }
+            editor.apply()
+            println("MessageStore: copied legacy shared message store into prod-scoped store.")
+        }.onFailure { error ->
+            println("MessageStore: legacy prod message migration skipped. ${error.localizedMessage}")
         }
     }
 
@@ -424,5 +468,9 @@ class MessageStore private constructor(
         private const val FILE_NAME = "split_secure_messages"
         private const val KEY_MESSAGES_JSON = "messages_json"
         private const val KEY_RECIPIENT_METADATA_JSON = "recipient_metadata_json"
+
+        private fun preferredFileName(): String {
+            return "$FILE_NAME.${AppConfig.messagingPushEnvironment}"
+        }
     }
 }

@@ -52,7 +52,7 @@ If you are reviewing this repo:
 ## Public Release Rules
 
 - Before publishing here, check for wallet seeds, keystores, signing assets, private support docs, internal notes, local-only config, and committed service credentials.
-- Keep backend configuration, messaging/lightning domains, support/contact examples, Firebase setup, maps/API key setup, and application identifiers public-safe unless the user explicitly chooses otherwise.
+- Keep backend configuration, messaging/lightning domains, support/contact examples, Firebase setup, maps/API key setup, and application IDs public-safe unless the user explicitly chooses otherwise.
 - Do not commit a real `app/google-services.json`.
 - Make sure README and public docs accurately describe the repo's public role and limitations.
 
@@ -67,7 +67,7 @@ When updating this public repo from private:
 
 - keep public-facing README, AGENTS, and publication-oriented docs as the base versions
 - update those docs only as needed to reflect new code or changed behavior
-- preserve public-safe placeholders for application identifiers, backend hosts, messaging/lightning domains, support/contact examples, and local config patterns
+- preserve public-safe placeholders for application IDs, backend hosts, messaging/lightning domains, support/contact examples, and local config patterns
 - keep Firebase and maps setup documentation public-safe and example-oriented
 - exclude local-only config files, `google-services.json`, build outputs, signing assets, and internal-only notes
 
@@ -89,7 +89,7 @@ Default review stance during a sync:
 
 Current public snapshot notes:
 
-- Public-safe placeholder backend hosts, application identifiers, messaging/lightning domains, and support/contact examples are expected here.
+- Public-safe placeholder backend hosts, application IDs, messaging/lightning domains, and support/contact examples are expected here.
 - A real `app/google-services.json` should not be committed.
 - Trust the actual public repo contents when describing what is publicly available.
 

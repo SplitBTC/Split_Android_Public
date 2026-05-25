@@ -38,6 +38,12 @@ data class RewardSpendResponse(
     val rewardSpendApplied: Boolean
 )
 
+data class RewardsCheckResponse(
+    val ok: Boolean,
+    val rewardEligible: Boolean,
+    val merchantMatched: Boolean
+)
+
 class RewardsRepository(
     private val httpClient: SplitHttpClient
 ) {
@@ -68,6 +74,7 @@ class RewardsRepository(
         destinationPubkey: String?,
         network: String,
         status: String,
+        paymentHash: String?,
         authManager: AuthManager,
         walletManager: WalletManager
     ): RewardSpendResponse {
@@ -80,6 +87,7 @@ class RewardsRepository(
             .put("destinationPubkey", destinationPubkey)
             .put("network", network)
             .put("status", status)
+            .put("paymentHash", paymentHash)
 
         var response = httpClient.postJson("/LogRewardSpend", requestBody.toString())
         if (response.statusCode == 401 || response.statusCode == 403) {
@@ -93,6 +101,33 @@ class RewardsRepository(
         }
 
         return response.body.toRewardSpendResponse()
+    }
+
+    suspend fun postRewardsCheck(
+        destinationPubkey: String,
+        authManager: AuthManager,
+        walletManager: WalletManager
+    ): RewardsCheckResponse {
+        val trimmedDestinationPubkey = destinationPubkey.trim()
+        require(trimmedDestinationPubkey.isNotEmpty()) { "destinationPubkey is required" }
+
+        authManager.ensureSession(walletManager)
+
+        val requestBody = JSONObject()
+            .put("destinationPubkey", trimmedDestinationPubkey)
+
+        var response = httpClient.postJson("/RewardsCheck", requestBody.toString())
+        if (response.statusCode == 401 || response.statusCode == 403) {
+            authManager.invalidateSession()
+            authManager.ensureSession(walletManager)
+            response = httpClient.postJson("/RewardsCheck", requestBody.toString())
+        }
+
+        if (response.statusCode !in 200..299) {
+            throw IllegalStateException("Failed to check rewards eligibility (${response.statusCode}).")
+        }
+
+        return response.body.toRewardsCheckResponse()
     }
 }
 
@@ -130,5 +165,14 @@ private fun String.toRewardSpendResponse(): RewardSpendResponse {
     return RewardSpendResponse(
         ok = json.optBoolean("ok", false),
         rewardSpendApplied = json.optBoolean("rewardSpendApplied", false)
+    )
+}
+
+private fun String.toRewardsCheckResponse(): RewardsCheckResponse {
+    val json = JSONObject(this)
+    return RewardsCheckResponse(
+        ok = json.optBoolean("ok", false),
+        rewardEligible = json.optBoolean("rewardEligible", false),
+        merchantMatched = json.optBoolean("merchantMatched", false)
     )
 }

@@ -1,6 +1,6 @@
 package com.split.android.core
 
-import com.example.splitandroid.BuildConfig
+import com.split.android.BuildConfig
 import java.net.URL
 
 object AppConfig {

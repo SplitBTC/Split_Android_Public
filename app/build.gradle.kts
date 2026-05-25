@@ -44,17 +44,17 @@ if (hasGoogleServicesConfig) {
 }
 
 android {
-    // Keep the public mirror on a placeholder generated Android namespace.
-    // Source packages intentionally remain under `com.split.android`.
-    namespace = "com.example.splitandroid"
-    compileSdk = 36
+    // Source packages and Android namespace remain under `com.split.android`;
+    // the public mirror uses a placeholder application ID instead.
+    namespace = "com.split.android"
+    compileSdk = 37
 
     defaultConfig {
         applicationId = splitApplicationId
         minSdk = 29
         targetSdk = 36
-        versionCode = 8
-        versionName = "0.4.0"
+        versionCode = 14
+        versionName = "0.7.0"
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
         manifestPlaceholders["MAPS_API_KEY"] = mapsApiKey
         buildConfigField("String", "MAPS_API_KEY", mapsApiKey.asBuildConfigString())
@@ -115,9 +115,13 @@ dependencies {
     implementation("androidx.camera:camera-view:1.5.3")
     implementation("androidx.work:work-runtime-ktx:2.11.0")
     implementation("androidx.security:security-crypto:1.0.0")
+    implementation("androidx.localbroadcastmanager:localbroadcastmanager:1.1.0")
     implementation("androidx.media3:media3-transformer:1.9.2")
     implementation("androidx.media3:media3-effect:1.9.2")
     implementation("org.bouncycastle:bcprov-jdk18on:1.80")
+    implementation("com.squareup.okhttp3:okhttp:4.12.0")
+    implementation("info.guardianproject:tor-android:0.4.9.8")
+    implementation("info.guardianproject:jtorctl:0.4.5.7")
     implementation("breez_sdk_spark:bindings-android:0.13.1")
     implementation("androidx.compose.ui:ui")
     implementation("androidx.compose.ui:ui-tooling-preview")
@@ -134,6 +138,7 @@ dependencies {
     implementation("com.google.android.gms:play-services-location:21.3.0")
     implementation("com.google.firebase:firebase-messaging")
     testImplementation("junit:junit:4.13.2")
+    testImplementation("org.json:json:20240303")
 
     debugImplementation("androidx.compose.ui:ui-tooling")
     debugImplementation("androidx.compose.ui:ui-test-manifest")

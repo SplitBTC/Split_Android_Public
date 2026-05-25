@@ -1,30 +1,18 @@
 package com.split.android.data.wallet
 
 import android.content.Context
-import android.content.SharedPreferences
-import com.split.android.data.security.openEncryptedPreferences
-import org.json.JSONArray
-
 class LndCredentialStore(
     context: Context
 ) {
-    private val appContext = context.applicationContext
-    @Volatile
-    private var preferences: SharedPreferences? = null
+    private val externalWalletStore = ExternalWalletStore(context)
 
     fun loadNodes(): List<LndNodeCredentials> {
-        val raw = runCatching {
-            preferences().getString(NODES_KEY, null)
-        }.getOrNull() ?: return emptyList()
-
-        return runCatching {
-            val array = JSONArray(raw)
-            buildList {
-                for (index in 0 until array.length()) {
-                    add(LndNodeCredentials.fromJson(array.getJSONObject(index)))
-                }
-            }
-        }.getOrDefault(emptyList())
+        externalWalletStore.migrateLegacyLndNodesIfNeeded()
+        return externalWalletStore.wallets(ExternalWalletKind.LND).mapNotNull { record ->
+            runCatching {
+                LndNodeCredentials.fromJson(record.payload).copy(label = record.label)
+            }.getOrNull()
+        }
     }
 
     fun activeNode(): LndNodeCredentials? {
@@ -34,78 +22,37 @@ class LndCredentialStore(
     }
 
     fun activeNodeId(): String? {
-        return runCatching {
-            preferences().getString(ACTIVE_NODE_ID_KEY, null)?.trim()?.ifBlank { null }
-        }.getOrNull()
+        val selection = externalWalletStore.reconcileActiveSelection()
+        return if (selection is SpendWalletSelection.External && selection.kind == ExternalWalletKind.LND) {
+            selection.id
+        } else {
+            null
+        }
     }
 
-    fun saveNode(node: LndNodeCredentials, makeActive: Boolean = true) {
-        val nodes = loadNodes()
-            .filterNot { existing ->
-                existing.id == node.id ||
-                    (existing.nodePubkey == null &&
-                        existing.host.equals(node.host, ignoreCase = true) &&
-                        existing.port == node.port)
-            }
-            .plus(node)
-            .sortedByDescending { it.connectedAtMillis }
-
-        saveNodes(nodes)
-
-        if (makeActive) {
-            setActiveNode(node.id)
-        }
+    fun saveNode(node: LndNodeCredentials, makeActive: Boolean = true): LndNodeCredentials {
+        return externalWalletStore.saveLndNode(node, makeActive)
     }
 
     fun setActiveNode(id: String) {
-        preferences().edit()
-            .putString(ACTIVE_NODE_ID_KEY, id)
-            .apply()
+        externalWalletStore.setActiveSelection(SpendWalletSelection.External(ExternalWalletKind.LND, id))
     }
 
     fun deleteNode(id: String) {
-        val nodes = loadNodes().filterNot { it.id == id }
-        saveNodes(nodes)
+        externalWalletStore.deleteWallet(ExternalWalletKind.LND, id)
 
-        if (activeNodeId() == id) {
-            if (nodes.isNotEmpty()) {
-                setActiveNode(nodes.first().id)
-            } else {
-                preferences().edit().remove(ACTIVE_NODE_ID_KEY).apply()
-            }
+        if (activeNodeId() == null) {
+            loadNodes().firstOrNull()?.let { setActiveNode(it.id) }
         }
+    }
+
+    fun renameNode(id: String, label: String) {
+        externalWalletStore.renameWallet(ExternalWalletKind.LND, id, label)
     }
 
     fun clear() {
-        preferences().edit()
-            .remove(NODES_KEY)
-            .remove(ACTIVE_NODE_ID_KEY)
-            .apply()
-    }
-
-    private fun saveNodes(nodes: List<LndNodeCredentials>) {
-        val array = JSONArray()
-        nodes.forEach { node -> array.put(node.toJson()) }
-        preferences().edit()
-            .putString(NODES_KEY, array.toString())
-            .apply()
-    }
-
-    private fun preferences(): SharedPreferences {
-        preferences?.let { return it }
-
-        return synchronized(this) {
-            preferences ?: openEncryptedPreferences(
-                context = appContext,
-                fileName = FILE_NAME,
-                logTag = "LndCredentialStore"
-            ).also { preferences = it }
+        loadNodes().forEach { node ->
+            externalWalletStore.deleteWallet(ExternalWalletKind.LND, node.id)
         }
-    }
-
-    private companion object {
-        const val FILE_NAME = "split_lnd_credentials"
-        const val NODES_KEY = "split.lnd.nodes.v1"
-        const val ACTIVE_NODE_ID_KEY = "split.lnd.activeNodeId.v1"
     }
 }

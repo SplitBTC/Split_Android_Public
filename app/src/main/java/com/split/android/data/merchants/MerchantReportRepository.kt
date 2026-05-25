@@ -25,13 +25,6 @@ class MerchantReportRepository(
             .put("merchantName", merchantName.trim())
             .put("merchantAddress", merchantAddress.trim())
             .put("destinationPubkey", destinationPubkey)
-            .put("transactionId", transaction.id)
-            .put("amountSats", transaction.amountSats)
-            .put("status", transaction.status)
-            .put("network", transaction.network)
-            .put("method", transaction.method)
-            .put("note", transaction.note)
-            .put("transactionDate", transaction.dateString)
 
         var response = httpClient.postJson(
             path = "/ReportMerchantPubkey",

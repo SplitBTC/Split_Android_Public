@@ -7,6 +7,7 @@ import android.content.Intent
 import android.graphics.Bitmap
 import android.graphics.Canvas
 import android.graphics.Color as AndroidColor
+import android.graphics.ImageDecoder
 import android.graphics.Paint
 import android.graphics.RectF
 import android.net.Uri
@@ -28,12 +29,25 @@ import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.asImageBitmap
 import androidx.compose.ui.unit.dp
 import androidx.core.content.FileProvider
+import com.google.mlkit.vision.barcode.BarcodeScannerOptions
+import com.google.mlkit.vision.barcode.BarcodeScanning
+import com.google.mlkit.vision.barcode.common.Barcode
+import com.google.mlkit.vision.common.InputImage
+import com.google.zxing.BinaryBitmap
 import com.google.zxing.BarcodeFormat
+import com.google.zxing.DecodeHintType
 import com.google.zxing.EncodeHintType
+import com.google.zxing.MultiFormatReader
+import com.google.zxing.RGBLuminanceSource
+import com.google.zxing.common.HybridBinarizer
+import com.google.zxing.multi.qrcode.QRCodeMultiReader
 import com.google.zxing.qrcode.QRCodeWriter
+import kotlinx.coroutines.suspendCancellableCoroutine
 import org.json.JSONObject
 import java.io.File
 import java.io.FileOutputStream
+import kotlin.coroutines.resume
+import kotlin.math.max
 
 data class SplitContactPayload(
     val type: String,
@@ -130,25 +144,267 @@ fun normalizePaymentRequest(raw: String): String? {
         return normalizePaymentRequest(withoutScheme) ?: withoutScheme
     }
 
+    if (isDirectLightningPaymentRequest(trimmed)) {
+        return trimmed
+    }
+
     if (lower.startsWith("bitcoin:")) {
         return runCatching { Uri.parse(trimmed) }.getOrNull()?.getQueryParameter("lightning")?.trim()
             ?.takeIf { it.isNotEmpty() }
+            ?.let { normalizePaymentRequest(it) ?: it }
             ?: trimmed
     }
 
-    runCatching { Uri.parse(trimmed) }.getOrNull()
-        ?.getQueryParameter("lightning")
-        ?.trim()
-        ?.takeIf { it.isNotEmpty() }
-        ?.let { return it }
+    val uri = runCatching { Uri.parse(trimmed) }.getOrNull()
+    val invoiceKeys = setOf("lightning", "invoice", "bolt11", "paymentrequest", "payment_request", "pr")
+    uri?.queryParameterNames
+        ?.firstOrNull { it.lowercase() in invoiceKeys }
+        ?.let { key ->
+            uri.getQueryParameter(key)
+                ?.trim()
+                ?.takeIf { it.isNotEmpty() }
+                ?.let { return normalizePaymentRequest(it) ?: it }
+        }
 
     return trimmed
+}
+
+private fun isDirectLightningPaymentRequest(value: String): Boolean {
+    val lower = value.trim().lowercase()
+    return lower.startsWith("lnbc") ||
+        lower.startsWith("lntb") ||
+        lower.startsWith("lnbcrt") ||
+        lower.startsWith("lnurl")
 }
 
 fun shouldOpenEntryFirstSendFlow(paymentRequest: String): Boolean {
     val trimmed = paymentRequest.trim()
     val lower = trimmed.lowercase()
-    return lower.startsWith("lnurl") || (trimmed.contains("@") && !trimmed.contains(" "))
+    return isAmountlessBolt11PaymentRequest(trimmed) ||
+        lower.startsWith("lnurl") ||
+        (trimmed.contains("@") && !trimmed.contains(" "))
+}
+
+fun isAmountlessBolt11PaymentRequest(paymentRequest: String): Boolean {
+    val trimmed = paymentRequest.trim()
+    if (trimmed.isEmpty()) return false
+
+    val lower = if (trimmed.lowercase().startsWith("lightning:")) {
+        trimmed.drop("lightning:".length).trim().lowercase()
+    } else {
+        trimmed.lowercase()
+    }
+
+    val separatorIndex = lower.lastIndexOf('1')
+    if (separatorIndex <= 0) return false
+
+    val humanReadablePart = lower.substring(0, separatorIndex)
+    val networkPrefix = listOf("lnbcrt", "lnbc", "lntb")
+        .firstOrNull { humanReadablePart.startsWith(it) }
+        ?: return false
+
+    return humanReadablePart.drop(networkPrefix.length).isEmpty()
+}
+
+sealed interface QrImageDecodeResult {
+    data class Success(val value: String) : QrImageDecodeResult
+    data object NoQrCode : QrImageDecodeResult
+    data object MultipleQrCodes : QrImageDecodeResult
+    data object ImageUnreadable : QrImageDecodeResult
+}
+
+suspend fun readSingleQrCodeFromImageUri(
+    context: Context,
+    uri: Uri
+): QrImageDecodeResult {
+    val bitmap = decodeBitmapFromUri(context, uri) ?: return QrImageDecodeResult.ImageUnreadable
+    val decodedQrValues = decodeQrCodeStrings(bitmap).distinct()
+
+    return when {
+        decodedQrValues.size > 1 -> QrImageDecodeResult.MultipleQrCodes
+        decodedQrValues.size == 1 -> QrImageDecodeResult.Success(decodedQrValues.first())
+        else -> QrImageDecodeResult.NoQrCode
+    }
+}
+
+fun readClipboardPaymentText(context: Context): String? {
+    val clipboard = context.getSystemService(Context.CLIPBOARD_SERVICE) as ClipboardManager
+    val clip = clipboard.primaryClip ?: return null
+
+    for (index in 0 until clip.itemCount) {
+        val text = clip.getItemAt(index)
+            ?.text
+            ?.toString()
+            ?.trim()
+            ?.takeIf { it.isNotEmpty() }
+        if (text != null) {
+            return text
+        }
+    }
+
+    return null
+}
+
+private fun decodeBitmapFromUri(context: Context, uri: Uri): Bitmap? {
+    return runCatching {
+        val source = ImageDecoder.createSource(context.contentResolver, uri)
+        ImageDecoder.decodeBitmap(source) { decoder, _, _ ->
+            decoder.allocator = ImageDecoder.ALLOCATOR_SOFTWARE
+            decoder.isMutableRequired = false
+        }
+    }.getOrNull()
+}
+
+private suspend fun decodeQrCodeStrings(bitmap: Bitmap): List<String> {
+    val decodedValues = linkedSetOf<String>()
+
+    for (candidate in bitmap.qrDecodeCandidates()) {
+        decodedValues.addAll(decodeQrCodeStringsWithMlKit(candidate))
+        decodedValues.addAll(decodeQrCodeStringsWithZxing(candidate))
+    }
+
+    return decodedValues.toList()
+}
+
+private suspend fun decodeQrCodeStringsWithMlKit(bitmap: Bitmap): List<String> {
+    val image = InputImage.fromBitmap(bitmap, 0)
+    val options = BarcodeScannerOptions.Builder()
+        .setBarcodeFormats(Barcode.FORMAT_QR_CODE)
+        .build()
+    val scanner = BarcodeScanning.getClient(options)
+
+    return suspendCancellableCoroutine { continuation ->
+        continuation.invokeOnCancellation { scanner.close() }
+        scanner.process(image)
+            .addOnSuccessListener { barcodes ->
+                val values = barcodes
+                    .filter { it.format == Barcode.FORMAT_QR_CODE }
+                    .mapNotNull { barcode ->
+                        listOfNotNull(
+                            barcode.rawValue,
+                            barcode.displayValue,
+                            barcode.url?.url
+                        ).firstNotNullOfOrNull { value ->
+                            value.trim().takeIf { it.isNotEmpty() }
+                        }
+                    }
+
+                if (continuation.isActive) {
+                    continuation.resume(values)
+                }
+            }
+            .addOnFailureListener {
+                if (continuation.isActive) {
+                    continuation.resume(emptyList())
+                }
+            }
+            .addOnCompleteListener {
+                scanner.close()
+            }
+    }
+}
+
+private fun decodeQrCodeStringsWithZxing(bitmap: Bitmap): List<String> {
+    val pixels = IntArray(bitmap.width * bitmap.height)
+    bitmap.getPixels(pixels, 0, bitmap.width, 0, 0, bitmap.width, bitmap.height)
+    val source = RGBLuminanceSource(bitmap.width, bitmap.height, pixels)
+    val hints = mapOf(
+        DecodeHintType.POSSIBLE_FORMATS to listOf(BarcodeFormat.QR_CODE),
+        DecodeHintType.TRY_HARDER to true
+    )
+
+    fun BinaryBitmap.decodedMultiple(): List<String> {
+        return runCatching {
+            QRCodeMultiReader()
+                .decodeMultiple(this, hints)
+                .mapNotNull { result -> result.text?.trim()?.takeIf { it.isNotEmpty() } }
+        }.getOrDefault(emptyList())
+    }
+
+    fun BinaryBitmap.decodedSingle(): List<String> {
+        return runCatching {
+            val reader = MultiFormatReader().apply { setHints(hints) }
+            listOfNotNull(reader.decodeWithState(this).text?.trim()?.takeIf { it.isNotEmpty() })
+        }.getOrDefault(emptyList())
+    }
+
+    val hybridBitmap = BinaryBitmap(HybridBinarizer(source))
+    return hybridBitmap.decodedMultiple().ifEmpty { hybridBitmap.decodedSingle() }
+}
+
+private fun Bitmap.qrDecodeCandidates(): List<Bitmap> {
+    val candidates = mutableListOf<Bitmap>()
+    val seen = linkedSetOf<String>()
+
+    fun add(bitmap: Bitmap?) {
+        if (bitmap == null || bitmap.width <= 0 || bitmap.height <= 0) return
+        val candidate = bitmap.scaledForQrDecode()
+        val key = "${candidate.width}:${candidate.height}:${System.identityHashCode(candidate)}"
+        if (seen.add(key)) {
+            candidates.add(candidate)
+        }
+    }
+
+    add(this)
+    heuristicQrCrops().forEach { crop ->
+        add(crop)
+        add(crop.withWhiteBorder((minOf(crop.width, crop.height) * 0.08f).toInt().coerceAtLeast(16)))
+    }
+
+    return candidates
+}
+
+private fun Bitmap.heuristicQrCrops(): List<Bitmap> {
+    val cropSpecs = listOf(
+        Triple(0.04f, 0.12f, 0.92f),
+        Triple(0.03f, 0.10f, 0.94f),
+        Triple(0.02f, 0.08f, 0.96f),
+        Triple(0.00f, 0.00f, 1.00f)
+    )
+    val crops = mutableListOf<Bitmap>()
+    val seenRects = linkedSetOf<String>()
+
+    for ((xRatio, yRatio, sizeRatio) in cropSpecs) {
+        val cropSize = minOf((width * sizeRatio).toInt(), height)
+        if (cropSize <= 120) continue
+
+        val left = (width * xRatio).toInt().coerceIn(0, (width - cropSize).coerceAtLeast(0))
+        val top = (height * yRatio).toInt().coerceIn(0, (height - cropSize).coerceAtLeast(0))
+        val key = "$left:$top:$cropSize"
+        if (!seenRects.add(key)) continue
+
+        runCatching {
+            Bitmap.createBitmap(this, left, top, cropSize, cropSize)
+        }.getOrNull()?.let(crops::add)
+    }
+
+    return crops
+}
+
+private fun Bitmap.withWhiteBorder(borderPx: Int): Bitmap? {
+    if (borderPx <= 0) return this
+
+    return runCatching {
+        Bitmap.createBitmap(
+            width + borderPx * 2,
+            height + borderPx * 2,
+            Bitmap.Config.ARGB_8888
+        ).apply {
+            val canvas = Canvas(this)
+            canvas.drawColor(AndroidColor.WHITE)
+            canvas.drawBitmap(this@withWhiteBorder, borderPx.toFloat(), borderPx.toFloat(), null)
+        }
+    }.getOrNull()
+}
+
+private fun Bitmap.scaledForQrDecode(): Bitmap {
+    val maxSide = max(width, height)
+    if (maxSide <= 2048) return this
+
+    val scale = 2048f / maxSide.toFloat()
+    val scaledWidth = (width * scale).toInt().coerceAtLeast(1)
+    val scaledHeight = (height * scale).toInt().coerceAtLeast(1)
+    return Bitmap.createScaledBitmap(this, scaledWidth, scaledHeight, true)
 }
 
 fun generateQrBitmap(content: String, sizePx: Int = 720): Bitmap? {

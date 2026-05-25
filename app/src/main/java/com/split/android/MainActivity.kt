@@ -1,5 +1,6 @@
 package com.split.android
 
+
 import android.content.Intent
 import android.net.Uri
 import android.os.Bundle
@@ -54,7 +55,6 @@ import kotlinx.coroutines.withContext
 import androidx.lifecycle.DefaultLifecycleObserver
 import androidx.lifecycle.LifecycleOwner
 import androidx.lifecycle.compose.LocalLifecycleOwner
-import com.example.splitandroid.BuildConfig
 import org.json.JSONObject
 import java.net.HttpURLConnection
 import java.net.URL
@@ -219,7 +219,7 @@ private fun ForcedUpdateScreen() {
                 )
 
                 Text(
-                    text = "Please update to the latest version of Split for continued usage. If you are having any issues please do not hesitate to reach out to ${AppConfig.supportLightningAddress}",
+                    text = "Please update to the latest version of Split for continued usage. If you are having any issues please do not hesitate to reach out to support@example.com",
                     style = MaterialTheme.typography.bodyLarge,
                     color = Color.White.copy(alpha = 0.78f),
                     textAlign = TextAlign.Center

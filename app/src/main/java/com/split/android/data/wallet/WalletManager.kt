@@ -413,6 +413,12 @@ class WalletManager(
         return sparkWalletClient.presetAmountSats(destination)
     }
 
+    suspend fun decodeBolt11InvoiceMetadata(invoice: String): Bolt11InvoiceMetadata? {
+        val existingState = _state.value
+        require(existingState is WalletState.Ready) { "Wallet is not ready yet." }
+        return sparkWalletClient.decodeBolt11InvoiceMetadata(invoice)
+    }
+
     suspend fun sendPreparedPayment(
         preparedPayment: PreparedOutgoingPayment
     ): PreparedOutgoingPaymentSendResult {
@@ -471,7 +477,7 @@ class WalletManager(
     }
 
     suspend fun createBolt11Invoice(
-        amountSats: Long,
+        amountSats: Long?,
         description: String?
     ): ReceiveInvoice {
         val existingState = _state.value
@@ -521,8 +527,18 @@ class WalletManager(
             walletPubkey = sparkWalletClient.currentWalletPubkey(),
             paymentIds = rows.map { it.id }
         )
+        val destinationMetadata = paymentUsdSnapshotStore.destinationMetadata(
+            walletPubkey = sparkWalletClient.currentWalletPubkey(),
+            paymentIds = rows.map { it.id }
+        )
+        captureDestinationMetadata(rows, sparkWalletClient.currentWalletPubkey())
         return rows.map { row ->
+            val metadata = destinationMetadata[row.id]
             row.withUserLog(userLogs[row.id])
+                .withDestinationMetadata(
+                    destinationPubkey = metadata?.destinationPubkey,
+                    paymentHash = metadata?.paymentHash
+                )
         }.also { rowsWithUserLogs ->
             scheduleUsdSnapshotBackfill(rowsWithUserLogs)
         }
@@ -558,12 +574,29 @@ class WalletManager(
 
             for (row in completedRows) {
                 if (!currentCoroutineContext().isActive) return
+                captureDestinationMetadata(row, walletPubkey)
                 persistUsdSnapshotIfNeeded(
                     row = row,
                     walletPubkey = walletPubkey
                 )
             }
         }
+    }
+
+    private fun captureDestinationMetadata(rows: List<WalletTransactionRow>, walletPubkey: String) {
+        rows
+            .filter { it.direction == "sent" }
+            .forEach { row -> captureDestinationMetadata(row, walletPubkey) }
+    }
+
+    private fun captureDestinationMetadata(row: WalletTransactionRow, walletPubkey: String) {
+        paymentUsdSnapshotStore.setDestinationMetadata(
+            walletPubkey = walletPubkey,
+            paymentId = row.id,
+            paymentType = if (row.direction == "received") "received" else "sent",
+            destinationPubkey = row.destinationPubkey,
+            paymentHash = row.paymentHash
+        )
     }
 
     private suspend fun persistUsdSnapshotIfNeeded(
@@ -829,6 +862,7 @@ class WalletManager(
                     ?.ifBlank { null },
                 network = rewardSpendNetwork(payment.method),
                 status = "Completed",
+                paymentHash = row.paymentHash?.trim()?.ifBlank { null },
                 authManager = authManager,
                 walletManager = this
             )

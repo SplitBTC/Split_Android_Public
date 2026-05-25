@@ -42,7 +42,7 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.dp
 import androidx.core.content.ContextCompat
-import com.example.splitandroid.R
+import com.split.android.R
 import com.split.android.ui.theme.SplitBlack
 import com.split.android.ui.theme.SplitBrandBlue
 import com.split.android.ui.theme.SplitBrandPink

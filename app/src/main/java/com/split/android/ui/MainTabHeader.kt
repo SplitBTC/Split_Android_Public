@@ -23,7 +23,7 @@ import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.res.painterResource
 import androidx.compose.ui.unit.dp
-import com.example.splitandroid.R
+import com.split.android.R
 
 private val MainTabHeaderPink = Color(0xFFBE3287)
 

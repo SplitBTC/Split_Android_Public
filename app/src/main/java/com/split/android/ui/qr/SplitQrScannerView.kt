@@ -4,9 +4,13 @@ import android.Manifest
 import android.annotation.SuppressLint
 import android.content.Context
 import android.content.pm.PackageManager
+import android.os.Handler
+import android.os.Looper
 import android.util.Size
+import androidx.activity.compose.BackHandler
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
+import androidx.camera.core.Camera
 import androidx.camera.core.CameraSelector
 import androidx.camera.core.FocusMeteringAction
 import androidx.camera.core.ImageAnalysis
@@ -16,13 +20,22 @@ import androidx.camera.core.resolutionselector.ResolutionStrategy
 import androidx.camera.lifecycle.ProcessCameraProvider
 import androidx.camera.view.PreviewView
 import androidx.compose.foundation.background
+import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.layout.size
+import androidx.compose.foundation.layout.statusBarsPadding
+import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.rounded.Close
+import androidx.compose.material.icons.rounded.Image
 import androidx.compose.material3.Button
+import androidx.compose.material3.CircularProgressIndicator
+import androidx.compose.material3.Icon
 import androidx.compose.material3.MaterialTheme
+import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.DisposableEffect
@@ -55,6 +68,7 @@ import java.util.concurrent.atomic.AtomicLong
 @Composable
 fun SplitQrScannerView(
     modifier: Modifier = Modifier,
+    preferredZoomFactor: Float = 1.6f,
     onCodeScanned: (String) -> Unit
 ) {
     val context = LocalContext.current
@@ -99,7 +113,7 @@ fun SplitQrScannerView(
         }
     }
 
-    DisposableEffect(hasCameraPermission, previewViewRef, lifecycleOwner) {
+    DisposableEffect(hasCameraPermission, previewViewRef, lifecycleOwner, preferredZoomFactor) {
         val previewView = previewViewRef
         if (!hasCameraPermission || previewView == null) {
             onDispose { }
@@ -168,13 +182,7 @@ fun SplitQrScannerView(
                             barcodeScanner.process(inputImage)
                                 .addOnSuccessListener { barcodes ->
                                     val raw = barcodes.firstNotNullOfOrNull { barcode ->
-                                        listOfNotNull(
-                                            barcode.rawValue,
-                                            barcode.displayValue,
-                                            barcode.url?.url
-                                        ).firstNotNullOfOrNull { value ->
-                                            value.trim().takeIf { it.isNotEmpty() }
-                                        }
+                                        barcode.bestTextValue()
                                     }
 
                                     if (!raw.isNullOrBlank() &&
@@ -245,17 +253,10 @@ fun SplitQrScannerView(
                                 previewView.width > 0 &&
                                 previewView.height > 0
                             ) {
-                                val meteringPoint = previewView.meteringPointFactory.createPoint(
-                                    previewView.width / 2f,
-                                    previewView.height / 2f
-                                )
-                                camera.cameraControl.startFocusAndMetering(
-                                    FocusMeteringAction.Builder(
-                                        meteringPoint,
-                                        FocusMeteringAction.FLAG_AF or FocusMeteringAction.FLAG_AE
-                                    )
-                                        .setAutoCancelDuration(3, TimeUnit.SECONDS)
-                                        .build()
+                                configureCameraForScanning(
+                                    camera = camera,
+                                    previewView = previewView,
+                                    preferredZoomFactor = preferredZoomFactor
                                 )
                             }
                         }
@@ -323,7 +324,7 @@ fun SplitQrScannerView(
                 verticalArrangement = Arrangement.spacedBy(12.dp)
             ) {
                 Text(
-                    text = "Camera access is required to scan payment and contact QR codes.",
+                    text = "Camera access is required to scan payment and wallet connection QR codes.",
                     style = MaterialTheme.typography.bodyMedium,
                     color = Color.White,
                     textAlign = TextAlign.Center
@@ -342,11 +343,130 @@ fun SplitQrScannerView(
     }
 }
 
+@Composable
+fun SplitFullScreenQrScanner(
+    onClose: () -> Unit,
+    onCodeScanned: (String) -> Unit,
+    modifier: Modifier = Modifier,
+    preferredZoomFactor: Float = 1.6f,
+    isProcessing: Boolean = false,
+    onChooseImage: (() -> Unit)? = null
+) {
+    BackHandler(onBack = onClose)
+
+    Box(
+        modifier = modifier
+            .fillMaxSize()
+            .background(Color.Black)
+    ) {
+        SplitQrScannerView(
+            modifier = Modifier.fillMaxSize(),
+            preferredZoomFactor = preferredZoomFactor,
+            onCodeScanned = onCodeScanned
+        )
+
+        Surface(
+            modifier = Modifier
+                .align(Alignment.TopStart)
+                .statusBarsPadding()
+                .padding(top = 14.dp, start = 16.dp)
+                .size(44.dp),
+            shape = CircleShape,
+            color = Color.Black.copy(alpha = 0.55f),
+            onClick = onClose
+        ) {
+            Box(contentAlignment = Alignment.Center) {
+                Icon(
+                    imageVector = Icons.Rounded.Close,
+                    contentDescription = "Close scanner",
+                    tint = Color.White
+                )
+            }
+        }
+
+        if (onChooseImage != null) {
+            Surface(
+                modifier = Modifier
+                    .align(Alignment.TopEnd)
+                    .statusBarsPadding()
+                    .padding(top = 14.dp, end = 16.dp)
+                    .size(44.dp),
+                shape = CircleShape,
+                color = Color.Black.copy(alpha = if (isProcessing) 0.32f else 0.55f),
+                onClick = {
+                    if (!isProcessing) {
+                        onChooseImage()
+                    }
+                }
+            ) {
+                Box(contentAlignment = Alignment.Center) {
+                    Icon(
+                        imageVector = Icons.Rounded.Image,
+                        contentDescription = "Choose QR code image",
+                        tint = Color.White.copy(alpha = if (isProcessing) 0.54f else 1f)
+                    )
+                }
+            }
+        }
+
+        if (isProcessing) {
+            Box(
+                modifier = Modifier
+                    .fillMaxSize()
+                    .background(Color.Black.copy(alpha = 0.45f)),
+                contentAlignment = Alignment.Center
+            ) {
+                CircularProgressIndicator(color = Color.White)
+            }
+        }
+
+    }
+}
+
+private fun configureCameraForScanning(
+    camera: Camera,
+    previewView: PreviewView,
+    preferredZoomFactor: Float
+) {
+    val zoomState = camera.cameraInfo.zoomState.value
+    val minZoom = zoomState?.minZoomRatio ?: 1f
+    val maxZoom = zoomState?.maxZoomRatio ?: preferredZoomFactor.coerceAtLeast(1f)
+    val requestedZoom = preferredZoomFactor.coerceAtLeast(1f)
+    val cappedZoom = requestedZoom.coerceIn(minZoom, maxZoom)
+
+    if (cappedZoom > 0f) {
+        camera.cameraControl.setZoomRatio(cappedZoom)
+    }
+
+    val meteringPoint = previewView.meteringPointFactory.createPoint(
+        previewView.width / 2f,
+        previewView.height / 2f
+    )
+    camera.cameraControl.startFocusAndMetering(
+        FocusMeteringAction.Builder(
+            meteringPoint,
+            FocusMeteringAction.FLAG_AF or FocusMeteringAction.FLAG_AE
+        )
+            .setAutoCancelDuration(3, TimeUnit.SECONDS)
+            .build()
+    )
+}
+
 private fun checkCameraPermission(context: Context): Boolean {
     return ContextCompat.checkSelfPermission(
         context,
         Manifest.permission.CAMERA
     ) == PackageManager.PERMISSION_GRANTED
+}
+
+private fun Barcode.bestTextValue(): String? {
+    return listOfNotNull(
+        rawValue,
+        displayValue,
+        url?.url
+    ).firstNotNullOfOrNull { value ->
+        value.trim().takeIf { it.isNotEmpty() }
+    }
 }
 
 private data class BoundQrCameraSession(
@@ -358,14 +478,17 @@ private data class BoundQrCameraSession(
 
 private object SplitQrCameraSessionCoordinator {
     private val nextSessionId = AtomicLong(0)
+    private val mainHandler = Handler(Looper.getMainLooper())
     private var activeSessionId: Long = 0
     private var boundSession: BoundQrCameraSession? = null
+    private var unbindGeneration: Long = 0
 
     fun nextSessionId(): Long = nextSessionId.incrementAndGet()
 
     @Synchronized
     fun activate(sessionId: Long) {
         activeSessionId = sessionId
+        unbindGeneration += 1
     }
 
     @Synchronized
@@ -375,6 +498,7 @@ private object SplitQrCameraSessionCoordinator {
 
     fun unbindCurrentBinding() {
         val session = synchronized(this) {
+            unbindGeneration += 1
             boundSession.also { boundSession = null }
         }
         session?.unbind()
@@ -402,18 +526,36 @@ private object SplitQrCameraSessionCoordinator {
     }
 
     fun unbindIfOwner(sessionId: Long) {
-        val session = synchronized(this) {
+        val generation = synchronized(this) {
             if (activeSessionId == sessionId) {
                 activeSessionId = 0
             }
 
             if (boundSession?.sessionId == sessionId) {
-                boundSession.also { boundSession = null }
+                unbindGeneration += 1
+                unbindGeneration
             } else {
-                null
+                0L
             }
         }
-        session?.unbind()
+        if (generation == 0L) return
+
+        mainHandler.postDelayed(
+            {
+                val session = synchronized(this) {
+                    if (unbindGeneration == generation &&
+                        activeSessionId == 0L &&
+                        boundSession?.sessionId == sessionId
+                    ) {
+                        boundSession.also { boundSession = null }
+                    } else {
+                        null
+                    }
+                }
+                session?.unbind()
+            },
+            350L
+        )
     }
 }
 

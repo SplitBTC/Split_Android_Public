@@ -1,5 +1,7 @@
 package com.split.android.data.wallet
 
+import com.split.android.core.AppConfig
+
 import breez_sdk_spark.BreezSdk
 import breez_sdk_spark.BuyBitcoinRequest
 import breez_sdk_spark.ClaimDepositRequest
@@ -36,7 +38,6 @@ import breez_sdk_spark.UpdateContactRequest
 import breez_sdk_spark.UpdateUserSettingsRequest
 import breez_sdk_spark.connect
 import breez_sdk_spark.defaultConfig
-import com.split.android.core.AppConfig
 import java.math.BigInteger
 import java.util.UUID
 
@@ -69,17 +70,33 @@ data class PaymentPreview(
     val methodLabel: String,
     val lndAmountOverrideSats: Long? = null,
     val destinationPubkey: String? = null,
-    val paymentHash: String? = null
+    val paymentHash: String? = null,
+    val rewardEligible: Boolean? = null
+)
+
+data class Bolt11InvoiceMetadata(
+    val amountSats: Long?,
+    val paymentHash: String?,
+    val destinationPubkey: String?,
+    val description: String?
 )
 
 enum class WalletBackend {
     SPARK,
-    LND
+    LND,
+    NWC,
+    CORE_LIGHTNING,
+    ECLAIR,
+    SPARK_SUBWALLET
 }
 
 enum class SpendWalletSource {
     SPARK,
-    LND
+    LND,
+    NWC,
+    CORE_LIGHTNING,
+    ECLAIR,
+    SPARK_SUBWALLET
 }
 
 sealed interface PreparedOutgoingPayment {
@@ -96,6 +113,18 @@ sealed interface PreparedOutgoingPayment {
     ) : PreparedOutgoingPayment
 
     data class Lnd(
+        override val preview: PaymentPreview
+    ) : PreparedOutgoingPayment
+
+    data class Nwc(
+        override val preview: PaymentPreview
+    ) : PreparedOutgoingPayment
+
+    data class CoreLightning(
+        override val preview: PaymentPreview
+    ) : PreparedOutgoingPayment
+
+    data class Eclair(
         override val preview: PaymentPreview
     ) : PreparedOutgoingPayment
 }
@@ -136,6 +165,7 @@ interface SparkWalletClient {
     suspend fun refreshWalletSnapshot(): WalletSnapshot
     suspend fun listTransactions(): List<WalletTransactionRow>
     suspend fun presetAmountSats(destination: String): Long?
+    suspend fun decodeBolt11InvoiceMetadata(invoice: String): Bolt11InvoiceMetadata?
     suspend fun prepareOutgoingPayment(
         destination: String,
         amountSats: Long?,
@@ -144,7 +174,7 @@ interface SparkWalletClient {
     ): PreparedOutgoingPayment
     suspend fun sendPreparedPayment(preparedPayment: PreparedOutgoingPayment): PreparedOutgoingPaymentSendResult
     suspend fun createBolt11Invoice(
-        amountSats: Long,
+        amountSats: Long?,
         description: String?
     ): ReceiveInvoice
     suspend fun createCashAppBuyUrl(amountSats: Long?): String
@@ -231,6 +261,22 @@ class BreezSparkWalletClient : SparkWalletClient {
         return currentSdk.parse(trimmedDestination).fixedBolt11AmountSats()
     }
 
+    override suspend fun decodeBolt11InvoiceMetadata(invoice: String): Bolt11InvoiceMetadata? {
+        val currentSdk = sdk ?: throw IllegalStateException("Spark wallet is not connected.")
+        val trimmedInvoice = invoice.trim()
+        if (!LndLightningPaymentResolver.isBolt11(trimmedInvoice)) return null
+
+        return when (val parsed = currentSdk.parse(trimmedInvoice)) {
+            is InputType.Bolt11Invoice -> Bolt11InvoiceMetadata(
+                amountSats = parsed.v1.amountMsat?.toLong()?.div(1_000L),
+                paymentHash = parsed.v1.paymentHash.trim().ifBlank { null },
+                destinationPubkey = parsed.v1.payeePubkey.trim().ifBlank { null },
+                description = parsed.v1.description?.trim()?.ifBlank { null }
+            )
+            else -> null
+        }
+    }
+
     override suspend fun prepareOutgoingPayment(
         destination: String,
         amountSats: Long?,
@@ -280,6 +326,14 @@ class BreezSparkWalletClient : SparkWalletClient {
             }
 
             else -> {
+                val bolt11Metadata = (parsed as? InputType.Bolt11Invoice)?.let {
+                    Bolt11InvoiceMetadata(
+                        amountSats = it.v1.amountMsat?.toLong()?.div(1_000L),
+                        paymentHash = it.v1.paymentHash.trim().ifBlank { null },
+                        destinationPubkey = it.v1.payeePubkey.trim().ifBlank { null },
+                        description = it.v1.description?.trim()?.ifBlank { null }
+                    )
+                }
                 val prepareResponse = currentSdk.prepareSendPayment(
                     PrepareSendPaymentRequest(
                         paymentRequest = trimmedDestination,
@@ -305,7 +359,9 @@ class BreezSparkWalletClient : SparkWalletClient {
                         amountSats = previewAmountSats,
                         feeSats = feeSats,
                         feesIncluded = responseFeesIncluded,
-                        methodLabel = prepareResponse.paymentMethodLabel()
+                        methodLabel = bolt11Metadata?.description ?: prepareResponse.paymentMethodLabel(),
+                        destinationPubkey = bolt11Metadata?.destinationPubkey,
+                        paymentHash = bolt11Metadata?.paymentHash
                     ),
                     prepareResponse = prepareResponse
                 )
@@ -341,6 +397,18 @@ class BreezSparkWalletClient : SparkWalletClient {
             is PreparedOutgoingPayment.Lnd -> {
                 throw IllegalArgumentException("LND payments are sent by the LND wallet manager.")
             }
+
+            is PreparedOutgoingPayment.Nwc -> {
+                throw IllegalArgumentException("NWC payments are sent by the NWC wallet manager.")
+            }
+
+            is PreparedOutgoingPayment.CoreLightning -> {
+                throw IllegalArgumentException("Core Lightning payments are sent by the Core Lightning wallet manager.")
+            }
+
+            is PreparedOutgoingPayment.Eclair -> {
+                throw IllegalArgumentException("Eclair payments are sent by the Eclair wallet manager.")
+            }
         }
 
         return when (payment.status) {
@@ -354,17 +422,16 @@ class BreezSparkWalletClient : SparkWalletClient {
     }
 
     override suspend fun createBolt11Invoice(
-        amountSats: Long,
+        amountSats: Long?,
         description: String?
     ): ReceiveInvoice {
         val currentSdk = sdk ?: throw IllegalStateException("Spark wallet is not connected.")
-        require(amountSats > 0) { "Enter an amount in sats." }
 
         val response: ReceivePaymentResponse = currentSdk.receivePayment(
             ReceivePaymentRequest(
                 ReceivePaymentMethod.Bolt11Invoice(
                     description = description?.trim().orEmpty(),
-                    amountSats = amountSats.toULong(),
+                    amountSats = amountSats?.takeIf { it > 0L }?.toULong(),
                     expirySecs = 3_600u,
                     paymentHash = null
                 )
@@ -373,7 +440,7 @@ class BreezSparkWalletClient : SparkWalletClient {
 
         return ReceiveInvoice(
             invoice = response.paymentRequest,
-            amountSats = amountSats,
+            amountSats = amountSats?.takeIf { it > 0L } ?: 0L,
             description = description?.trim()?.ifBlank { null },
             feeSats = response.fee.toLong()
         )

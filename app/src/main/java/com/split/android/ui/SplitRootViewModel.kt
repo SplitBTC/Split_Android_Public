@@ -41,27 +41,59 @@ import com.split.android.data.rewards.RewardsRepository
 import com.split.android.data.wallet.BreezApiRepository
 import com.split.android.data.wallet.BreezSparkWalletClient
 import com.split.android.data.wallet.ActiveSpendWalletStore
+import com.split.android.data.wallet.CoreLightningBalanceSummary
+import com.split.android.data.wallet.CoreLightningConnectionState
+import com.split.android.data.wallet.CoreLightningCredentialStore
+import com.split.android.data.wallet.CoreLightningNodeCredentials
+import com.split.android.data.wallet.CoreLightningWalletException
+import com.split.android.data.wallet.CoreLightningWalletManager
+import com.split.android.data.wallet.EclairBalanceSummary
+import com.split.android.data.wallet.EclairConnectionState
+import com.split.android.data.wallet.EclairCredentialStore
+import com.split.android.data.wallet.EclairNodeCredentials
+import com.split.android.data.wallet.EclairWalletException
+import com.split.android.data.wallet.EclairWalletManager
+import com.split.android.data.wallet.ExternalWalletRecord
+import com.split.android.data.wallet.ExternalWalletStore
 import com.split.android.data.wallet.LndBalanceSummary
 import com.split.android.data.wallet.LndConnectionState
 import com.split.android.data.wallet.LndCredentialStore
+import com.split.android.data.wallet.LndLightningPaymentResolver
 import com.split.android.data.wallet.LndNodeCredentials
 import com.split.android.data.wallet.LndWalletException
 import com.split.android.data.wallet.LndWalletManager
 import com.split.android.data.wallet.MnemonicGenerator
+import com.split.android.data.wallet.NwcBalanceSummary
+import com.split.android.data.wallet.NwcConnectionState
+import com.split.android.data.wallet.NwcCredentialStore
+import com.split.android.data.wallet.NwcWalletCredentials
+import com.split.android.data.wallet.NwcWalletException
+import com.split.android.data.wallet.NwcWalletManager
 import com.split.android.data.wallet.PaymentPreview
+import com.split.android.data.wallet.PaymentDestinationMetadata
 import com.split.android.data.wallet.PaymentUsdSnapshot
 import com.split.android.data.wallet.PaymentUsdSnapshotStore
 import com.split.android.data.wallet.PreparedOutgoingPayment
 import com.split.android.data.wallet.PreparedOutgoingPaymentSendResult
 import com.split.android.data.wallet.ReceiveInvoice
+import com.split.android.data.wallet.RemoteNodeTorTransport
 import com.split.android.data.wallet.SeedStore
 import com.split.android.data.wallet.SpendWalletSource
+import com.split.android.data.wallet.SparkSubwalletBalanceSummary
+import com.split.android.data.wallet.SparkSubwalletConnectionState
+import com.split.android.data.wallet.SparkSubwalletCredentialStore
+import com.split.android.data.wallet.SparkSubwalletCredentials
+import com.split.android.data.wallet.SparkSubwalletException
+import com.split.android.data.wallet.SparkSubwalletManager
+import com.split.android.data.wallet.SparkSubwalletStore
 import com.split.android.data.wallet.UnclaimedBitcoinDeposit
 import com.split.android.data.wallet.WalletContact
+import com.split.android.data.wallet.WalletBackend
 import com.split.android.data.wallet.WalletLightningAddressInfo
 import com.split.android.data.wallet.WalletTransactionRow
 import com.split.android.data.wallet.WalletManager
 import com.split.android.data.wallet.WalletState
+import com.split.android.data.wallet.usesTor
 import kotlinx.coroutines.NonCancellable
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.collectLatest
@@ -72,6 +104,30 @@ import kotlinx.coroutines.flow.stateIn
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import kotlin.math.roundToInt
+
+private fun PreparedOutgoingPayment.withPreview(
+    preview: PaymentPreview
+): PreparedOutgoingPayment {
+    return when (this) {
+        is PreparedOutgoingPayment.Standard -> copy(preview = preview)
+        is PreparedOutgoingPayment.Lnurl -> copy(preview = preview)
+        is PreparedOutgoingPayment.Lnd -> copy(preview = preview)
+        is PreparedOutgoingPayment.Nwc -> copy(preview = preview)
+        is PreparedOutgoingPayment.CoreLightning -> copy(preview = preview)
+        is PreparedOutgoingPayment.Eclair -> copy(preview = preview)
+    }
+}
+
+private fun WalletBackend.rewardsSpendWalletSource(): SpendWalletSource {
+    return when (this) {
+        WalletBackend.SPARK -> SpendWalletSource.SPARK
+        WalletBackend.LND -> SpendWalletSource.LND
+        WalletBackend.NWC -> SpendWalletSource.NWC
+        WalletBackend.CORE_LIGHTNING -> SpendWalletSource.CORE_LIGHTNING
+        WalletBackend.ECLAIR -> SpendWalletSource.ECLAIR
+        WalletBackend.SPARK_SUBWALLET -> SpendWalletSource.SPARK_SUBWALLET
+    }
+}
 
 class SplitRootViewModel(
     application: Application
@@ -90,8 +146,15 @@ class SplitRootViewModel(
     private val bitcoinEventsRepository = BitcoinEventsRepository(httpClient)
     private val messagingBlockRepository = MessagingBlockRepository(httpClient)
     private val sparkWalletClient = BreezSparkWalletClient()
+    private val sparkSubwalletWalletClient = BreezSparkWalletClient()
     private val mnemonicGenerator = MnemonicGenerator(application)
     private val lndCredentialStore = LndCredentialStore(application)
+    private val nwcCredentialStore = NwcCredentialStore(application)
+    private val coreLightningCredentialStore = CoreLightningCredentialStore(application)
+    private val eclairCredentialStore = EclairCredentialStore(application)
+    private val sparkSubwalletCredentialStore = SparkSubwalletCredentialStore(application)
+    private val sparkSubwalletStore = SparkSubwalletStore(application)
+    private val externalWalletStore = ExternalWalletStore(application)
     private val activeSpendWalletStore = ActiveSpendWalletStore(application, lndCredentialStore)
     private val lndPaymentUsdSnapshotStore = PaymentUsdSnapshotStore(application)
     private val _walletEventVersion = MutableStateFlow(0L)
@@ -119,6 +182,42 @@ class SplitRootViewModel(
             walletManager.showIncomingPaymentResult()
             notifyWalletActivity()
         },
+        onWalletActivity = {
+            notifyWalletActivity()
+        }
+    )
+    private val nwcWalletManager = NwcWalletManager(
+        context = application,
+        credentialStore = nwcCredentialStore,
+        onPaymentReceived = {
+            walletManager.showIncomingPaymentResult()
+            notifyWalletActivity()
+        },
+        onWalletActivity = {
+            notifyWalletActivity()
+        }
+    )
+    private val coreLightningWalletManager = CoreLightningWalletManager(
+        context = application,
+        credentialStore = coreLightningCredentialStore,
+        onWalletActivity = {
+            notifyWalletActivity()
+        }
+    )
+    private val eclairWalletManager = EclairWalletManager(
+        context = application,
+        credentialStore = eclairCredentialStore,
+        onWalletActivity = {
+            notifyWalletActivity()
+        }
+    )
+    private val sparkSubwalletManager = SparkSubwalletManager(
+        context = application,
+        credentialStore = sparkSubwalletCredentialStore,
+        store = sparkSubwalletStore,
+        breezApiRepository = breezApiRepository,
+        sparkWalletClient = sparkSubwalletWalletClient,
+        mnemonicGenerator = mnemonicGenerator,
         onWalletActivity = {
             notifyWalletActivity()
         }
@@ -228,6 +327,132 @@ class SplitRootViewModel(
             initialValue = null
         )
 
+    val nwcConnectionState: StateFlow<NwcConnectionState> = nwcWalletManager.state
+        .stateIn(
+            scope = viewModelScope,
+            started = SharingStarted.Eagerly,
+            initialValue = NwcConnectionState.Disconnected
+        )
+
+    val connectedNwcWallet: StateFlow<NwcWalletCredentials?> = nwcWalletManager.connectedWallet
+        .stateIn(
+            scope = viewModelScope,
+            started = SharingStarted.Eagerly,
+            initialValue = null
+        )
+
+    val nwcBalanceSummary: StateFlow<NwcBalanceSummary?> = nwcWalletManager.balanceSummary
+        .stateIn(
+            scope = viewModelScope,
+            started = SharingStarted.Eagerly,
+            initialValue = null
+        )
+
+    val coreLightningConnectionState: StateFlow<CoreLightningConnectionState> = coreLightningWalletManager.state
+        .stateIn(
+            scope = viewModelScope,
+            started = SharingStarted.Eagerly,
+            initialValue = CoreLightningConnectionState.Disconnected
+        )
+
+    val connectedCoreLightningNode: StateFlow<CoreLightningNodeCredentials?> = coreLightningWalletManager.connectedNode
+        .stateIn(
+            scope = viewModelScope,
+            started = SharingStarted.Eagerly,
+            initialValue = null
+        )
+
+    val coreLightningBalanceSummary: StateFlow<CoreLightningBalanceSummary?> = coreLightningWalletManager.balanceSummary
+        .stateIn(
+            scope = viewModelScope,
+            started = SharingStarted.Eagerly,
+            initialValue = null
+        )
+
+    val eclairConnectionState: StateFlow<EclairConnectionState> = eclairWalletManager.state
+        .stateIn(
+            scope = viewModelScope,
+            started = SharingStarted.Eagerly,
+            initialValue = EclairConnectionState.Disconnected
+        )
+
+    val connectedEclairNode: StateFlow<EclairNodeCredentials?> = eclairWalletManager.connectedNode
+        .stateIn(
+            scope = viewModelScope,
+            started = SharingStarted.Eagerly,
+            initialValue = null
+        )
+
+    val eclairBalanceSummary: StateFlow<EclairBalanceSummary?> = eclairWalletManager.balanceSummary
+        .stateIn(
+            scope = viewModelScope,
+            started = SharingStarted.Eagerly,
+            initialValue = null
+        )
+
+    val sparkSubwalletConnectionState: StateFlow<SparkSubwalletConnectionState> = sparkSubwalletManager.state
+        .stateIn(
+            scope = viewModelScope,
+            started = SharingStarted.Eagerly,
+            initialValue = SparkSubwalletConnectionState.Disconnected
+        )
+
+    val connectedSparkSubwallet: StateFlow<SparkSubwalletCredentials?> = sparkSubwalletManager.connectedWallet
+        .stateIn(
+            scope = viewModelScope,
+            started = SharingStarted.Eagerly,
+            initialValue = null
+        )
+
+    val sparkSubwalletBalanceSummary: StateFlow<SparkSubwalletBalanceSummary?> = sparkSubwalletManager.balanceSummary
+        .stateIn(
+            scope = viewModelScope,
+            started = SharingStarted.Eagerly,
+            initialValue = null
+        )
+
+    val sparkSubwalletPendingSeedWords: StateFlow<List<String>> = sparkSubwalletManager.pendingSeedWords
+        .stateIn(
+            scope = viewModelScope,
+            started = SharingStarted.Eagerly,
+            initialValue = emptyList()
+        )
+
+    val storedNwcWalletsVersion: StateFlow<Long> = nwcWalletManager.storedWalletsVersion
+        .stateIn(
+            scope = viewModelScope,
+            started = SharingStarted.Eagerly,
+            initialValue = 0L
+        )
+
+    val storedCoreLightningNodesVersion: StateFlow<Long> = coreLightningWalletManager.storedNodesVersion
+        .stateIn(
+            scope = viewModelScope,
+            started = SharingStarted.Eagerly,
+            initialValue = 0L
+        )
+
+    val storedEclairNodesVersion: StateFlow<Long> = eclairWalletManager.storedNodesVersion
+        .stateIn(
+            scope = viewModelScope,
+            started = SharingStarted.Eagerly,
+            initialValue = 0L
+        )
+
+    val storedSparkSubwalletsVersion: StateFlow<Long> = sparkSubwalletManager.storedWalletsVersion
+        .stateIn(
+            scope = viewModelScope,
+            started = SharingStarted.Eagerly,
+            initialValue = 0L
+        )
+
+    val storedLndNodesVersion: StateFlow<Long> = lndWalletManager.storedNodesVersion
+        .stateIn(
+            scope = viewModelScope,
+            started = SharingStarted.Eagerly,
+            initialValue = 0L
+        )
+
     private val _contactsByPaymentIdentifier = MutableStateFlow<Map<String, WalletContact>>(emptyMap())
     val contactsByPaymentIdentifier: StateFlow<Map<String, WalletContact>> = _contactsByPaymentIdentifier.asStateFlow()
 
@@ -241,7 +466,14 @@ class SplitRootViewModel(
             MessageSyncScheduler.disableLegacyPeriodicSync(getApplication())
             walletManager.configure()
             runCatching { lndWalletManager.restoreActiveNode() }
-            activeSpendWalletStore.reconcileWithStoredNode()
+            runCatching { nwcWalletManager.restoreActiveWallet() }
+            runCatching { coreLightningWalletManager.restoreActiveNode() }
+            runCatching { eclairWalletManager.restoreActiveNode() }
+            activeSpendWalletStore.reconcileWithStoredWallets()
+            warmTorForActiveWalletIfNeeded()
+            if (activeSpendWalletStore.isSparkSubwalletActive) {
+                runCatching { sparkSubwalletManager.restoreWalletIfNeeded() }
+            }
             authenticateIfPossible()
             loadContactsIfPossible()
             if (walletManager.state.value is WalletState.Ready) {
@@ -255,7 +487,14 @@ class SplitRootViewModel(
             MessageSyncScheduler.disableLegacyPeriodicSync(getApplication())
             walletManager.restoreWallet(seedPhrase)
             runCatching { lndWalletManager.restoreActiveNode() }
-            activeSpendWalletStore.reconcileWithStoredNode()
+            runCatching { nwcWalletManager.restoreActiveWallet() }
+            runCatching { coreLightningWalletManager.restoreActiveNode() }
+            runCatching { eclairWalletManager.restoreActiveNode() }
+            activeSpendWalletStore.reconcileWithStoredWallets()
+            warmTorForActiveWalletIfNeeded()
+            if (activeSpendWalletStore.isSparkSubwalletActive) {
+                runCatching { sparkSubwalletManager.restoreWalletIfNeeded() }
+            }
             authenticateIfPossible()
             loadContactsIfPossible()
             if (walletManager.state.value is WalletState.Ready) {
@@ -273,7 +512,14 @@ class SplitRootViewModel(
             MessageSyncScheduler.disableLegacyPeriodicSync(getApplication())
             walletManager.confirmPendingWalletCreation()
             runCatching { lndWalletManager.restoreActiveNode() }
-            activeSpendWalletStore.reconcileWithStoredNode()
+            runCatching { nwcWalletManager.restoreActiveWallet() }
+            runCatching { coreLightningWalletManager.restoreActiveNode() }
+            runCatching { eclairWalletManager.restoreActiveNode() }
+            activeSpendWalletStore.reconcileWithStoredWallets()
+            warmTorForActiveWalletIfNeeded()
+            if (activeSpendWalletStore.isSparkSubwalletActive) {
+                runCatching { sparkSubwalletManager.restoreWalletIfNeeded() }
+            }
             authenticateIfPossible()
             loadContactsIfPossible()
             if (walletManager.state.value is WalletState.Ready) {
@@ -290,6 +536,10 @@ class SplitRootViewModel(
         launchGuarded("clearWallet") {
             walletManager.removeWalletFromDevice()
             lndWalletManager.disconnectFromActiveNode()
+            nwcWalletManager.disconnectFromActiveWallet()
+            coreLightningWalletManager.disconnectFromActiveNode()
+            eclairWalletManager.disconnectFromActiveNode()
+            sparkSubwalletManager.disconnectActiveWallet()
             messagingRepository.clearAll()
             authManager.invalidateSession()
             _contactsByPaymentIdentifier.value = emptyMap()
@@ -316,48 +566,209 @@ class SplitRootViewModel(
         feesIncluded: Boolean = false,
         comment: String? = null
     ): PreparedOutgoingPayment {
-        return if (activeSpendWalletStore.isLndActive) {
-            lndWalletManager.prepareOutgoingPayment(
-                paymentRequest = destination,
-                amountSats = amountSats,
-                feesIncluded = feesIncluded,
-                comment = comment
-            )
-        } else {
-            walletManager.prepareOutgoingPayment(
-                destination = destination,
-                amountSats = amountSats,
-                feesIncluded = feesIncluded,
-                comment = comment
-            )
+        return when (activeSpendWallet.value) {
+            SpendWalletSource.LND -> {
+                lndWalletManager.prepareOutgoingPayment(
+                    paymentRequest = destination,
+                    amountSats = amountSats,
+                    feesIncluded = feesIncluded,
+                    comment = comment
+                )
+            }
+            SpendWalletSource.CORE_LIGHTNING -> {
+                coreLightningWalletManager.prepareOutgoingPayment(
+                    paymentRequest = destination,
+                    amountSats = amountSats,
+                    feesIncluded = feesIncluded,
+                    comment = comment
+                )
+            }
+            SpendWalletSource.ECLAIR -> {
+                eclairWalletManager.prepareOutgoingPayment(
+                    paymentRequest = destination,
+                    amountSats = amountSats,
+                    feesIncluded = feesIncluded,
+                    comment = comment
+                )
+            }
+            SpendWalletSource.NWC -> {
+                if (!nwcWalletManager.isConnected) {
+                    nwcWalletManager.restoreActiveWallet()
+                }
+                val invoice = destination.trim()
+                if (!LndLightningPaymentResolver.isBolt11(invoice)) {
+                    throw IllegalArgumentException("NWC payments require a Lightning invoice.")
+                }
+                val localMetadata = walletManager.decodeBolt11InvoiceMetadata(invoice)
+                val lookup = runCatching { nwcWalletManager.lookupInvoice(invoice) }.getOrNull()
+                val resolvedAmountSats = localMetadata?.amountSats?.takeIf { it > 0L }
+                    ?: lookup?.amountSats?.takeIf { it > 0L }
+                    ?: amountSats?.takeIf { it > 0L }
+                    ?: throw IllegalArgumentException("Enter an amount for this invoice.")
+                val destinationPubkey = localMetadata?.destinationPubkey?.trim()?.ifBlank { null }
+                val paymentHash = lookup?.paymentHash?.trim()?.ifBlank { null }
+                    ?: localMetadata?.paymentHash?.trim()?.ifBlank { null }
+
+                if (destinationPubkey == null || paymentHash == null) {
+                    throw NwcWalletException.RewardsMetadataUnavailable
+                }
+
+                PreparedOutgoingPayment.Nwc(
+                    preview = PaymentPreview(
+                        backend = WalletBackend.NWC,
+                        destination = invoice,
+                        amountSats = resolvedAmountSats,
+                        feeSats = lookup?.feesPaidSats,
+                        feesIncluded = feesIncluded,
+                        methodLabel = lookup?.description?.trim()?.ifBlank { null }
+                            ?: localMetadata.description?.trim()?.ifBlank { null }
+                            ?: "Lightning Invoice",
+                        lndAmountOverrideSats = if (localMetadata.amountSats == null && lookup?.amountSats == null) resolvedAmountSats else null,
+                        destinationPubkey = destinationPubkey,
+                        paymentHash = paymentHash
+                    )
+                )
+            }
+            SpendWalletSource.SPARK -> {
+                walletManager.prepareOutgoingPayment(
+                    destination = destination,
+                    amountSats = amountSats,
+                    feesIncluded = feesIncluded,
+                    comment = comment
+                )
+            }
+            SpendWalletSource.SPARK_SUBWALLET -> {
+                if (!sparkSubwalletManager.isConnected) {
+                    sparkSubwalletManager.restoreWalletIfNeeded()
+                }
+                sparkSubwalletManager.prepareOutgoingPayment(
+                    destination = destination,
+                    amountSats = amountSats,
+                    feesIncluded = feesIncluded,
+                    comment = comment
+                )
+            }
         }
+    }
+
+    suspend fun checkPreparedPaymentRewards(preparedPayment: PreparedOutgoingPayment): PreparedOutgoingPayment {
+        val preview = preparedPayment.preview
+        val fallbackMetadata = if (preview.destinationPubkey.isNullOrBlank()) {
+            decodeInvoiceDestinationMetadata(preview.destination, preview.backend.rewardsSpendWalletSource())
+        } else {
+            null
+        }
+        val destinationPubkey = preview.destinationPubkey
+            ?.trim()
+            ?.ifBlank { null }
+            ?: fallbackMetadata?.destinationPubkey?.trim()?.ifBlank { null }
+        val paymentHash = preview.paymentHash
+            ?.trim()
+            ?.ifBlank { null }
+            ?: fallbackMetadata?.paymentHash?.trim()?.ifBlank { null }
+
+        val rewardEligible = if (destinationPubkey == null) {
+            false
+        } else {
+            runCatching {
+                rewardsRepository.postRewardsCheck(
+                    destinationPubkey = destinationPubkey,
+                    authManager = authManager,
+                    walletManager = walletManager
+                ).rewardEligible
+            }.onFailure { error ->
+                Log.w(
+                    "SplitRootViewModel",
+                    "Failed to check rewards eligibility. ${error.localizedMessage}",
+                    error
+                )
+            }.getOrDefault(false)
+        }
+
+        return preparedPayment.withPreview(
+            preview.copy(
+                destinationPubkey = destinationPubkey,
+                paymentHash = paymentHash,
+                rewardEligible = rewardEligible
+            )
+        )
     }
 
     suspend fun presetSendAmountSats(
         destination: String
     ): Long? {
-        if (!activeSpendWalletStore.isLndActive) {
-            return walletManager.presetAmountSats(destination)
-        }
-
         val normalized = destination.trim()
-        if (!com.split.android.data.wallet.LndLightningPaymentResolver.isBolt11(normalized)) {
-            return null
+        return when (activeSpendWallet.value) {
+            SpendWalletSource.SPARK -> walletManager.presetAmountSats(destination)
+            SpendWalletSource.NWC -> {
+                if (!LndLightningPaymentResolver.isBolt11(normalized)) {
+                    return null
+                }
+                if (!nwcWalletManager.isConnected) {
+                    runCatching { nwcWalletManager.restoreActiveWallet() }
+                }
+                runCatching { nwcWalletManager.lookupInvoice(normalized).amountSats }
+                    .getOrNull()
+                    ?.takeIf { it > 0L }
+            }
+            SpendWalletSource.LND -> {
+                if (!LndLightningPaymentResolver.isBolt11(normalized)) {
+                    return null
+                }
+                if (!lndWalletManager.isConnected) {
+                    runCatching { lndWalletManager.restoreActiveNode() }
+                }
+                runCatching {
+                    lndWalletManager.decodeInvoice(normalized).amountSats
+                }.getOrNull()?.takeIf { it > 0L }
+            }
+            SpendWalletSource.CORE_LIGHTNING -> {
+                if (!LndLightningPaymentResolver.isBolt11(normalized)) {
+                    return null
+                }
+                if (!coreLightningWalletManager.isConnected) {
+                    runCatching { coreLightningWalletManager.restoreActiveNode() }
+                }
+                runCatching {
+                    coreLightningWalletManager.decodeInvoice(normalized).amountSats
+                }.getOrNull()?.takeIf { it > 0L }
+            }
+            SpendWalletSource.ECLAIR -> {
+                if (!LndLightningPaymentResolver.isBolt11(normalized)) {
+                    return null
+                }
+                if (!eclairWalletManager.isConnected) {
+                    runCatching { eclairWalletManager.restoreActiveNode() }
+                }
+                runCatching {
+                    eclairWalletManager.decodeInvoice(normalized).amountSats
+                }.getOrNull()?.takeIf { it > 0L }
+            }
+            SpendWalletSource.SPARK_SUBWALLET -> {
+                if (!sparkSubwalletManager.isConnected) {
+                    runCatching { sparkSubwalletManager.restoreWalletIfNeeded() }
+                }
+                runCatching { sparkSubwalletManager.presetAmountSats(destination) }
+                    .getOrNull()
+                    ?.takeIf { it > 0L }
+            }
         }
-
-        if (!lndWalletManager.isConnected) {
-            runCatching { lndWalletManager.restoreActiveNode() }
-        }
-
-        return runCatching {
-            lndWalletManager.decodeInvoice(normalized).amountSats
-        }.getOrNull()?.takeIf { it > 0L }
     }
 
     suspend fun sendPreparedPayment(preparedPayment: PreparedOutgoingPayment) {
         when (preparedPayment) {
             is PreparedOutgoingPayment.Lnd -> sendPreparedLndPayment(preparedPayment.preview)
-            else -> walletManager.sendPreparedPayment(preparedPayment)
+            is PreparedOutgoingPayment.Nwc -> sendPreparedNwcPayment(preparedPayment.preview)
+            is PreparedOutgoingPayment.CoreLightning -> sendPreparedCoreLightningPayment(preparedPayment.preview)
+            is PreparedOutgoingPayment.Eclair -> sendPreparedEclairPayment(preparedPayment.preview)
+            is PreparedOutgoingPayment.Standard,
+            is PreparedOutgoingPayment.Lnurl -> {
+                if (preparedPayment.preview.backend == WalletBackend.SPARK_SUBWALLET) {
+                    sendPreparedSparkSubwalletPayment(preparedPayment)
+                } else {
+                    walletManager.sendPreparedPayment(preparedPayment)
+                }
+            }
         }
     }
 
@@ -369,22 +780,35 @@ class SplitRootViewModel(
                     is PreparedOutgoingPayment.Lnd -> {
                         sendPreparedLndPayment(preparedPayment.preview)
                     }
-
-                    else -> {
-                        when (val result = walletManager.sendPreparedPayment(preparedPayment)) {
-                            is PreparedOutgoingPaymentSendResult.Completed -> {
-                                walletManager.suppressOutgoingSuccessToastForPayment(result.paymentId)
-                                walletManager.showOutgoingPaymentSuccess()
-                            }
-
-                            is PreparedOutgoingPaymentSendResult.Pending -> Unit
-
-                            is PreparedOutgoingPaymentSendResult.Failed -> {
-                                result.paymentId?.let(walletManager::suppressOutgoingFailureToastForPayment)
-                                val message = result.message?.trim().orEmpty().ifBlank {
-                                    "Unable to send payment."
+                    is PreparedOutgoingPayment.Nwc -> {
+                        sendPreparedNwcPayment(preparedPayment.preview)
+                    }
+                    is PreparedOutgoingPayment.CoreLightning -> {
+                        sendPreparedCoreLightningPayment(preparedPayment.preview)
+                    }
+                    is PreparedOutgoingPayment.Eclair -> {
+                        sendPreparedEclairPayment(preparedPayment.preview)
+                    }
+                    is PreparedOutgoingPayment.Standard,
+                    is PreparedOutgoingPayment.Lnurl -> {
+                        if (preparedPayment.preview.backend == WalletBackend.SPARK_SUBWALLET) {
+                            sendPreparedSparkSubwalletPayment(preparedPayment)
+                        } else {
+                            when (val result = walletManager.sendPreparedPayment(preparedPayment)) {
+                                is PreparedOutgoingPaymentSendResult.Completed -> {
+                                    walletManager.suppressOutgoingSuccessToastForPayment(result.paymentId)
+                                    walletManager.showOutgoingPaymentSuccess()
                                 }
-                                walletManager.showOutgoingPaymentFailure(subtitle = message)
+
+                                is PreparedOutgoingPaymentSendResult.Pending -> Unit
+
+                                is PreparedOutgoingPaymentSendResult.Failed -> {
+                                    result.paymentId?.let(walletManager::suppressOutgoingFailureToastForPayment)
+                                    val message = result.message?.trim().orEmpty().ifBlank {
+                                        "Unable to send payment."
+                                    }
+                                    walletManager.showOutgoingPaymentFailure(subtitle = message)
+                                }
                             }
                         }
                     }
@@ -399,29 +823,86 @@ class SplitRootViewModel(
     }
 
     suspend fun createBolt11Invoice(
-        amountSats: Long,
+        amountSats: Long?,
         description: String?
     ): ReceiveInvoice {
-        return if (activeSpendWalletStore.isLndActive) {
-            if (!lndWalletManager.isConnected) {
-                lndWalletManager.restoreActiveNode()
-            }
+        return when (activeSpendWallet.value) {
+            SpendWalletSource.LND -> {
+                if (!lndWalletManager.isConnected) {
+                    lndWalletManager.restoreActiveNode()
+                }
 
-            val response = lndWalletManager.createInvoice(
-                amountSats = amountSats,
-                memo = description
-            )
-            ReceiveInvoice(
-                invoice = response.paymentRequest,
-                amountSats = amountSats,
-                description = description?.trim()?.ifBlank { null },
-                feeSats = 0L
-            )
-        } else {
-            walletManager.createBolt11Invoice(
-                amountSats = amountSats,
-                description = description
-            )
+                val response = lndWalletManager.createInvoice(
+                    amountSats = amountSats,
+                    memo = description
+                )
+                ReceiveInvoice(
+                    invoice = response.paymentRequest,
+                    amountSats = amountSats?.takeIf { it > 0L } ?: 0L,
+                    description = description?.trim()?.ifBlank { null },
+                    feeSats = 0L
+                )
+            }
+            SpendWalletSource.NWC -> {
+                if (!nwcWalletManager.isConnected) {
+                    nwcWalletManager.restoreActiveWallet()
+                }
+                val result = nwcWalletManager.createInvoice(
+                    amountSats = amountSats,
+                    memo = description
+                )
+                ReceiveInvoice(
+                    invoice = result.invoice ?: throw NwcWalletException.InvalidRelayResponse,
+                    amountSats = amountSats?.takeIf { it > 0L } ?: 0L,
+                    description = description?.trim()?.ifBlank { null },
+                    feeSats = 0L
+                )
+            }
+            SpendWalletSource.CORE_LIGHTNING -> {
+                if (!coreLightningWalletManager.isConnected) {
+                    coreLightningWalletManager.restoreActiveNode()
+                }
+                val result = coreLightningWalletManager.createInvoice(
+                    amountSats = amountSats,
+                    memo = description
+                )
+                ReceiveInvoice(
+                    invoice = result.bolt11,
+                    amountSats = amountSats?.takeIf { it > 0L } ?: 0L,
+                    description = description?.trim()?.ifBlank { null },
+                    feeSats = 0L
+                )
+            }
+            SpendWalletSource.ECLAIR -> {
+                if (!eclairWalletManager.isConnected) {
+                    eclairWalletManager.restoreActiveNode()
+                }
+                val result = eclairWalletManager.createInvoice(
+                    amountSats = amountSats,
+                    memo = description
+                )
+                ReceiveInvoice(
+                    invoice = result.serialized,
+                    amountSats = amountSats?.takeIf { it > 0L } ?: 0L,
+                    description = description?.trim()?.ifBlank { null },
+                    feeSats = 0L
+                )
+            }
+            SpendWalletSource.SPARK -> {
+                walletManager.createBolt11Invoice(
+                    amountSats = amountSats,
+                    description = description
+                )
+            }
+            SpendWalletSource.SPARK_SUBWALLET -> {
+                if (!sparkSubwalletManager.isConnected) {
+                    sparkSubwalletManager.restoreWalletIfNeeded()
+                }
+                sparkSubwalletManager.createInvoice(
+                    amountSats = amountSats,
+                    memo = description
+                )
+            }
         }
     }
 
@@ -449,20 +930,98 @@ class SplitRootViewModel(
     suspend fun fetchTransactionRows(
         source: SpendWalletSource = activeSpendWallet.value
     ): List<WalletTransactionRow> {
-        return if (source == SpendWalletSource.LND) {
-            if (!lndWalletManager.isConnected) {
-                lndWalletManager.restoreActiveNode()
+        return when (source) {
+            SpendWalletSource.LND -> {
+                if (!lndWalletManager.isConnected) {
+                    lndWalletManager.restoreActiveNode()
+                }
+                val rows = lndWalletManager.fetchTransactionRows()
+                val scope = lndWalletManager.walletScopeIdentifier()
+                    ?: throw LndWalletException.NoStoredNode
+                captureTransactionDestinationMetadata(rows, scope)
+                val userLogs = lndPaymentUsdSnapshotStore.userLogs(
+                    walletPubkey = scope,
+                    paymentIds = rows.map { it.id }
+                )
+                val destinationMetadata = lndPaymentUsdSnapshotStore.destinationMetadata(
+                    walletPubkey = scope,
+                    paymentIds = rows.map { it.id }
+                )
+                rows.map { row -> row.withUserLogAndDestinationMetadata(userLogs, destinationMetadata) }
             }
-            val rows = lndWalletManager.fetchTransactionRows()
-            val scope = lndWalletManager.walletScopeIdentifier()
-                ?: throw LndWalletException.NoStoredNode
-            val userLogs = lndPaymentUsdSnapshotStore.userLogs(
-                walletPubkey = scope,
-                paymentIds = rows.map { it.id }
-            )
-            rows.map { row -> row.withUserLog(userLogs[row.id]) }
-        } else {
-            walletManager.fetchTransactionRows()
+            SpendWalletSource.NWC -> {
+                if (!nwcWalletManager.isConnected) {
+                    nwcWalletManager.restoreActiveWallet()
+                }
+                val rows = nwcWalletManager.fetchTransactionRows()
+                val scope = nwcWalletManager.walletScopeIdentifier()
+                    ?: throw NwcWalletException.NoStoredConnection
+                captureTransactionDestinationMetadata(rows, scope)
+                val userLogs = lndPaymentUsdSnapshotStore.userLogs(
+                    walletPubkey = scope,
+                    paymentIds = rows.map { it.id }
+                )
+                val destinationMetadata = lndPaymentUsdSnapshotStore.destinationMetadata(
+                    walletPubkey = scope,
+                    paymentIds = rows.map { it.id }
+                )
+                rows.map { row -> row.withUserLogAndDestinationMetadata(userLogs, destinationMetadata) }
+            }
+            SpendWalletSource.CORE_LIGHTNING -> {
+                if (!coreLightningWalletManager.isConnected) {
+                    coreLightningWalletManager.restoreActiveNode()
+                }
+                val rows = coreLightningWalletManager.fetchTransactionRows()
+                val scope = coreLightningWalletManager.walletScopeIdentifier()
+                    ?: throw CoreLightningWalletException.NoStoredNode
+                captureTransactionDestinationMetadata(rows, scope)
+                val userLogs = lndPaymentUsdSnapshotStore.userLogs(
+                    walletPubkey = scope,
+                    paymentIds = rows.map { it.id }
+                )
+                val destinationMetadata = lndPaymentUsdSnapshotStore.destinationMetadata(
+                    walletPubkey = scope,
+                    paymentIds = rows.map { it.id }
+                )
+                rows.map { row -> row.withUserLogAndDestinationMetadata(userLogs, destinationMetadata) }
+            }
+            SpendWalletSource.ECLAIR -> {
+                if (!eclairWalletManager.isConnected) {
+                    eclairWalletManager.restoreActiveNode()
+                }
+                val rows = eclairWalletManager.fetchTransactionRows()
+                val scope = eclairWalletManager.walletScopeIdentifier()
+                    ?: throw EclairWalletException.NoStoredNode
+                captureTransactionDestinationMetadata(rows, scope)
+                val userLogs = lndPaymentUsdSnapshotStore.userLogs(
+                    walletPubkey = scope,
+                    paymentIds = rows.map { it.id }
+                )
+                val destinationMetadata = lndPaymentUsdSnapshotStore.destinationMetadata(
+                    walletPubkey = scope,
+                    paymentIds = rows.map { it.id }
+                )
+                rows.map { row -> row.withUserLogAndDestinationMetadata(userLogs, destinationMetadata) }
+            }
+            SpendWalletSource.SPARK -> walletManager.fetchTransactionRows()
+            SpendWalletSource.SPARK_SUBWALLET -> {
+                if (!sparkSubwalletManager.isConnected) {
+                    sparkSubwalletManager.restoreWalletIfNeeded()
+                }
+                val rows = sparkSubwalletManager.fetchTransactionRows()
+                val scope = sparkSubwalletManager.walletScopeIdentifier()
+                    ?: throw SparkSubwalletException.NoStoredWallet
+                captureTransactionDestinationMetadata(rows, scope)
+                val userLogs = lndPaymentUsdSnapshotStore.userLogs(
+                    walletPubkey = scope,
+                    paymentIds = rows.map { it.id }
+                )
+                val destinationMetadata = lndPaymentUsdSnapshotStore.destinationMetadata(
+                    walletPubkey = scope,
+                    paymentIds = rows.map { it.id }
+                )
+                rows.map { row -> row.withUserLogAndDestinationMetadata(userLogs, destinationMetadata) }
+            }
         }
     }
 
@@ -470,30 +1029,105 @@ class SplitRootViewModel(
         transactions: List<WalletTransactionRow>,
         source: SpendWalletSource = activeSpendWallet.value
     ) {
-        if (source == SpendWalletSource.LND) {
-            ensureLndUsdSnapshots(transactions)
-        } else {
-            walletManager.ensureUsdSnapshots(transactions)
+        when (source) {
+            SpendWalletSource.LND -> ensureLndUsdSnapshots(transactions)
+            SpendWalletSource.NWC -> {
+                ensureExternalUsdSnapshots(
+                    transactions = transactions,
+                    scope = nwcWalletManager.walletScopeIdentifier() ?: throw NwcWalletException.NoStoredConnection
+                )
+            }
+            SpendWalletSource.CORE_LIGHTNING -> {
+                ensureExternalUsdSnapshots(
+                    transactions = transactions,
+                    scope = coreLightningWalletManager.walletScopeIdentifier()
+                        ?: throw CoreLightningWalletException.NoStoredNode
+                )
+            }
+            SpendWalletSource.ECLAIR -> {
+                ensureExternalUsdSnapshots(
+                    transactions = transactions,
+                    scope = eclairWalletManager.walletScopeIdentifier()
+                        ?: throw EclairWalletException.NoStoredNode
+                )
+            }
+            SpendWalletSource.SPARK -> walletManager.ensureUsdSnapshots(transactions)
+            SpendWalletSource.SPARK_SUBWALLET -> {
+                ensureExternalUsdSnapshots(
+                    transactions = transactions,
+                    scope = sparkSubwalletManager.walletScopeIdentifier()
+                        ?: throw SparkSubwalletException.NoStoredWallet
+                )
+            }
         }
+    }
+
+    private fun WalletTransactionRow.withUserLogAndDestinationMetadata(
+        userLogs: Map<String, String>,
+        destinationMetadata: Map<String, PaymentDestinationMetadata>
+    ): WalletTransactionRow {
+        val metadata = destinationMetadata[id]
+        return withUserLog(userLogs[id])
+            .withDestinationMetadata(
+                destinationPubkey = metadata?.destinationPubkey,
+                paymentHash = metadata?.paymentHash
+            )
+    }
+
+    private fun captureTransactionDestinationMetadata(
+        rows: List<WalletTransactionRow>,
+        scope: String
+    ) {
+        rows
+            .filter { it.direction == "sent" }
+            .forEach { row ->
+                lndPaymentUsdSnapshotStore.setDestinationMetadata(
+                    walletPubkey = scope,
+                    paymentId = row.id,
+                    paymentType = if (row.direction == "received") "received" else "sent",
+                    destinationPubkey = row.destinationPubkey,
+                    paymentHash = row.paymentHash
+                )
+            }
     }
 
     suspend fun transactionUsdSnapshots(
         paymentIds: List<String>,
         source: SpendWalletSource = activeSpendWallet.value
     ): Map<String, PaymentUsdSnapshot> {
-        return if (source == SpendWalletSource.LND) {
-            val scope = lndWalletManager.walletScopeIdentifier()
-                ?: throw LndWalletException.NoStoredNode
-            lndPaymentUsdSnapshotStore.snapshots(
-                walletPubkey = scope,
-                paymentIds = paymentIds
-            )
-        } else {
-            val walletPubkey = walletManager.currentWalletPubkey()
-            PaymentUsdSnapshotStore(getApplication()).snapshots(
-                walletPubkey = walletPubkey,
-                paymentIds = paymentIds
-            )
+        return when (source) {
+            SpendWalletSource.LND -> {
+                val scope = lndWalletManager.walletScopeIdentifier()
+                    ?: throw LndWalletException.NoStoredNode
+                lndPaymentUsdSnapshotStore.snapshots(walletPubkey = scope, paymentIds = paymentIds)
+            }
+            SpendWalletSource.NWC -> {
+                val scope = nwcWalletManager.walletScopeIdentifier()
+                    ?: throw NwcWalletException.NoStoredConnection
+                lndPaymentUsdSnapshotStore.snapshots(walletPubkey = scope, paymentIds = paymentIds)
+            }
+            SpendWalletSource.CORE_LIGHTNING -> {
+                val scope = coreLightningWalletManager.walletScopeIdentifier()
+                    ?: throw CoreLightningWalletException.NoStoredNode
+                lndPaymentUsdSnapshotStore.snapshots(walletPubkey = scope, paymentIds = paymentIds)
+            }
+            SpendWalletSource.ECLAIR -> {
+                val scope = eclairWalletManager.walletScopeIdentifier()
+                    ?: throw EclairWalletException.NoStoredNode
+                lndPaymentUsdSnapshotStore.snapshots(walletPubkey = scope, paymentIds = paymentIds)
+            }
+            SpendWalletSource.SPARK -> {
+                val walletPubkey = walletManager.currentWalletPubkey()
+                PaymentUsdSnapshotStore(getApplication()).snapshots(
+                    walletPubkey = walletPubkey,
+                    paymentIds = paymentIds
+                )
+            }
+            SpendWalletSource.SPARK_SUBWALLET -> {
+                val scope = sparkSubwalletManager.walletScopeIdentifier()
+                    ?: throw SparkSubwalletException.NoStoredWallet
+                lndPaymentUsdSnapshotStore.snapshots(walletPubkey = scope, paymentIds = paymentIds)
+            }
         }
     }
 
@@ -501,15 +1135,33 @@ class SplitRootViewModel(
         paymentIds: List<String>,
         source: SpendWalletSource = activeSpendWallet.value
     ): Map<String, Boolean> {
-        return if (source == SpendWalletSource.LND) {
-            val scope = lndWalletManager.walletScopeIdentifier()
-                ?: throw LndWalletException.NoStoredNode
-            lndPaymentUsdSnapshotStore.reportableStates(
-                walletPubkey = scope,
-                paymentIds = paymentIds
-            )
-        } else {
-            walletManager.transactionReportableStates(paymentIds)
+        return when (source) {
+            SpendWalletSource.LND -> {
+                val scope = lndWalletManager.walletScopeIdentifier()
+                    ?: throw LndWalletException.NoStoredNode
+                lndPaymentUsdSnapshotStore.reportableStates(walletPubkey = scope, paymentIds = paymentIds)
+            }
+            SpendWalletSource.NWC -> {
+                val scope = nwcWalletManager.walletScopeIdentifier()
+                    ?: throw NwcWalletException.NoStoredConnection
+                lndPaymentUsdSnapshotStore.reportableStates(walletPubkey = scope, paymentIds = paymentIds)
+            }
+            SpendWalletSource.CORE_LIGHTNING -> {
+                val scope = coreLightningWalletManager.walletScopeIdentifier()
+                    ?: throw CoreLightningWalletException.NoStoredNode
+                lndPaymentUsdSnapshotStore.reportableStates(walletPubkey = scope, paymentIds = paymentIds)
+            }
+            SpendWalletSource.ECLAIR -> {
+                val scope = eclairWalletManager.walletScopeIdentifier()
+                    ?: throw EclairWalletException.NoStoredNode
+                lndPaymentUsdSnapshotStore.reportableStates(walletPubkey = scope, paymentIds = paymentIds)
+            }
+            SpendWalletSource.SPARK -> walletManager.transactionReportableStates(paymentIds)
+            SpendWalletSource.SPARK_SUBWALLET -> {
+                val scope = sparkSubwalletManager.walletScopeIdentifier()
+                    ?: throw SparkSubwalletException.NoStoredWallet
+                lndPaymentUsdSnapshotStore.reportableStates(walletPubkey = scope, paymentIds = paymentIds)
+            }
         }
     }
 
@@ -519,21 +1171,39 @@ class SplitRootViewModel(
         isReportable: Boolean,
         source: SpendWalletSource = activeSpendWallet.value
     ) {
-        if (source == SpendWalletSource.LND) {
-            val scope = lndWalletManager.walletScopeIdentifier()
-                ?: throw LndWalletException.NoStoredNode
-            lndPaymentUsdSnapshotStore.setReportable(
-                walletPubkey = scope,
-                paymentId = paymentId,
-                paymentType = if (direction == "received") "received" else "sent",
-                isReportable = isReportable
-            )
-        } else {
-            walletManager.setTransactionReportable(
-                paymentId = paymentId,
-                direction = direction,
-                isReportable = isReportable
-            )
+        when (source) {
+            SpendWalletSource.LND,
+            SpendWalletSource.NWC,
+            SpendWalletSource.CORE_LIGHTNING,
+            SpendWalletSource.ECLAIR,
+            SpendWalletSource.SPARK_SUBWALLET -> {
+                val scope = when (source) {
+                    SpendWalletSource.LND -> lndWalletManager.walletScopeIdentifier()
+                        ?: throw LndWalletException.NoStoredNode
+                    SpendWalletSource.NWC -> nwcWalletManager.walletScopeIdentifier()
+                        ?: throw NwcWalletException.NoStoredConnection
+                    SpendWalletSource.CORE_LIGHTNING -> coreLightningWalletManager.walletScopeIdentifier()
+                        ?: throw CoreLightningWalletException.NoStoredNode
+                    SpendWalletSource.ECLAIR -> eclairWalletManager.walletScopeIdentifier()
+                        ?: throw EclairWalletException.NoStoredNode
+                    SpendWalletSource.SPARK_SUBWALLET -> sparkSubwalletManager.walletScopeIdentifier()
+                        ?: throw SparkSubwalletException.NoStoredWallet
+                    SpendWalletSource.SPARK -> "spark"
+                }
+                lndPaymentUsdSnapshotStore.setReportable(
+                    walletPubkey = scope,
+                    paymentId = paymentId,
+                    paymentType = if (direction == "received") "received" else "sent",
+                    isReportable = isReportable
+                )
+            }
+            SpendWalletSource.SPARK -> {
+                walletManager.setTransactionReportable(
+                    paymentId = paymentId,
+                    direction = direction,
+                    isReportable = isReportable
+                )
+            }
         }
     }
 
@@ -543,22 +1213,280 @@ class SplitRootViewModel(
         userLog: String?,
         source: SpendWalletSource = activeSpendWallet.value
     ) {
-        if (source == SpendWalletSource.LND) {
-            val scope = lndWalletManager.walletScopeIdentifier()
-                ?: throw LndWalletException.NoStoredNode
-            lndPaymentUsdSnapshotStore.setUserLog(
-                walletPubkey = scope,
-                paymentId = paymentId,
-                paymentType = if (direction == "received") "received" else "sent",
-                userLog = userLog
-            )
-        } else {
-            walletManager.setTransactionUserLog(
-                paymentId = paymentId,
-                direction = direction,
-                userLog = userLog
+        when (source) {
+            SpendWalletSource.LND,
+            SpendWalletSource.NWC,
+            SpendWalletSource.CORE_LIGHTNING,
+            SpendWalletSource.ECLAIR,
+            SpendWalletSource.SPARK_SUBWALLET -> {
+                val scope = when (source) {
+                    SpendWalletSource.LND -> lndWalletManager.walletScopeIdentifier()
+                        ?: throw LndWalletException.NoStoredNode
+                    SpendWalletSource.NWC -> nwcWalletManager.walletScopeIdentifier()
+                        ?: throw NwcWalletException.NoStoredConnection
+                    SpendWalletSource.CORE_LIGHTNING -> coreLightningWalletManager.walletScopeIdentifier()
+                        ?: throw CoreLightningWalletException.NoStoredNode
+                    SpendWalletSource.ECLAIR -> eclairWalletManager.walletScopeIdentifier()
+                        ?: throw EclairWalletException.NoStoredNode
+                    SpendWalletSource.SPARK_SUBWALLET -> sparkSubwalletManager.walletScopeIdentifier()
+                        ?: throw SparkSubwalletException.NoStoredWallet
+                    SpendWalletSource.SPARK -> "spark"
+                }
+                lndPaymentUsdSnapshotStore.setUserLog(
+                    walletPubkey = scope,
+                    paymentId = paymentId,
+                    paymentType = if (direction == "received") "received" else "sent",
+                    userLog = userLog
+                )
+            }
+            SpendWalletSource.SPARK -> {
+                walletManager.setTransactionUserLog(
+                    paymentId = paymentId,
+                    direction = direction,
+                    userLog = userLog
+                )
+            }
+        }
+    }
+
+    suspend fun resolveMerchantReportTransaction(
+        transaction: WalletTransactionRow,
+        source: SpendWalletSource = activeSpendWallet.value
+    ): WalletTransactionRow {
+        val metadata = resolveDestinationMetadata(transaction, source)
+            ?: throw IllegalStateException("Unable to determine destination pubkey.")
+        val destinationPubkey = metadata.destinationPubkey?.trim()?.ifBlank { null }
+            ?: throw IllegalStateException("Unable to determine destination pubkey.")
+        val enrichedTransaction = transaction.withDestinationMetadata(
+            destinationPubkey = destinationPubkey,
+            paymentHash = metadata.paymentHash ?: transaction.paymentHash
+        )
+        persistTransactionDestinationMetadata(enrichedTransaction, source)
+        return enrichedTransaction
+    }
+
+    private suspend fun resolveDestinationMetadata(
+        transaction: WalletTransactionRow,
+        source: SpendWalletSource
+    ): PaymentDestinationMetadata? {
+        transaction.destinationPubkey?.trim()?.ifBlank { null }?.let { destinationPubkey ->
+            return PaymentDestinationMetadata(
+                destinationPubkey = destinationPubkey,
+                paymentHash = transaction.paymentHash?.trim()?.ifBlank { null }
             )
         }
+
+        storedDestinationMetadata(transaction, source)
+            ?.takeIf { !it.destinationPubkey.isNullOrBlank() }
+            ?.let { return it }
+
+        transaction.invoice?.trim()?.ifBlank { null }?.let { invoice ->
+            decodeInvoiceDestinationMetadata(invoice, source)
+                ?.takeIf { !it.destinationPubkey.isNullOrBlank() }
+                ?.let { return it }
+        }
+
+        return resolveDestinationMetadataFromWallet(transaction, source)
+    }
+
+    private suspend fun storedDestinationMetadata(
+        transaction: WalletTransactionRow,
+        source: SpendWalletSource
+    ): PaymentDestinationMetadata? {
+        val scope = transactionMetadataScope(source) ?: return null
+        val store = if (source == SpendWalletSource.SPARK) {
+            PaymentUsdSnapshotStore(getApplication())
+        } else {
+            lndPaymentUsdSnapshotStore
+        }
+        return store.destinationMetadata(
+            walletPubkey = scope,
+            paymentIds = listOf(transaction.id)
+        )[transaction.id]
+    }
+
+    private suspend fun decodeInvoiceDestinationMetadata(
+        invoice: String,
+        source: SpendWalletSource
+    ): PaymentDestinationMetadata? {
+        return runCatching {
+            when (source) {
+                SpendWalletSource.LND -> {
+                    val decoded = lndWalletManager.decodeInvoice(invoice)
+                    PaymentDestinationMetadata(
+                        destinationPubkey = decoded.destination?.trim()?.ifBlank { null },
+                        paymentHash = decoded.paymentHash?.trim()?.ifBlank { null }
+                    )
+                }
+                SpendWalletSource.CORE_LIGHTNING -> {
+                    val decoded = coreLightningWalletManager.decodeInvoice(invoice)
+                    PaymentDestinationMetadata(
+                        destinationPubkey = decoded.payee?.trim()?.ifBlank { null },
+                        paymentHash = decoded.paymentHash?.trim()?.ifBlank { null }
+                    )
+                }
+                SpendWalletSource.ECLAIR -> {
+                    val decoded = eclairWalletManager.decodeInvoice(invoice)
+                    PaymentDestinationMetadata(
+                        destinationPubkey = decoded.nodeId?.trim()?.ifBlank { null },
+                        paymentHash = decoded.paymentHash?.trim()?.ifBlank { null }
+                    )
+                }
+                SpendWalletSource.SPARK_SUBWALLET -> {
+                    val decoded = sparkSubwalletManager.decodeBolt11InvoiceMetadata(invoice)
+                    PaymentDestinationMetadata(
+                        destinationPubkey = decoded?.destinationPubkey?.trim()?.ifBlank { null },
+                        paymentHash = decoded?.paymentHash?.trim()?.ifBlank { null }
+                    )
+                }
+                SpendWalletSource.SPARK,
+                SpendWalletSource.NWC -> {
+                    val decoded = walletManager.decodeBolt11InvoiceMetadata(invoice)
+                    PaymentDestinationMetadata(
+                        destinationPubkey = decoded?.destinationPubkey?.trim()?.ifBlank { null },
+                        paymentHash = decoded?.paymentHash?.trim()?.ifBlank { null }
+                    )
+                }
+            }
+        }.getOrNull()
+    }
+
+    private suspend fun resolveDestinationMetadataFromWallet(
+        transaction: WalletTransactionRow,
+        source: SpendWalletSource
+    ): PaymentDestinationMetadata? {
+        return when (source) {
+            SpendWalletSource.LND -> {
+                if (!lndWalletManager.isConnected) lndWalletManager.restoreActiveNode()
+                lndWalletManager.fetchTransactionRows()
+                    .matchingTransaction(transaction)
+                    ?.destinationMetadata()
+            }
+            SpendWalletSource.NWC -> {
+                if (!nwcWalletManager.isConnected) nwcWalletManager.restoreActiveWallet()
+                nwcWalletManager.fetchTransactionRows()
+                    .matchingTransaction(transaction)
+                    ?.destinationMetadata()
+                    ?.takeIf { !it.destinationPubkey.isNullOrBlank() }
+                    ?: resolveNwcDestinationMetadataByPaymentHash(transaction)
+            }
+            SpendWalletSource.CORE_LIGHTNING -> {
+                if (!coreLightningWalletManager.isConnected) coreLightningWalletManager.restoreActiveNode()
+                coreLightningWalletManager.fetchTransactionRows()
+                    .matchingTransaction(transaction)
+                    ?.destinationMetadata()
+            }
+            SpendWalletSource.ECLAIR -> {
+                if (!eclairWalletManager.isConnected) eclairWalletManager.restoreActiveNode()
+                eclairWalletManager.fetchTransactionRows()
+                    .matchingTransaction(transaction)
+                    ?.destinationMetadata()
+                    ?.takeIf { !it.destinationPubkey.isNullOrBlank() }
+                    ?: resolveEclairDestinationMetadataByPaymentHash(transaction)
+            }
+            SpendWalletSource.SPARK -> {
+                walletManager.fetchTransactionRows()
+                    .matchingTransaction(transaction)
+                    ?.destinationMetadata()
+            }
+            SpendWalletSource.SPARK_SUBWALLET -> {
+                if (!sparkSubwalletManager.isConnected) sparkSubwalletManager.restoreWalletIfNeeded()
+                sparkSubwalletManager.fetchTransactionRows()
+                    .matchingTransaction(transaction)
+                    ?.destinationMetadata()
+            }
+        }
+    }
+
+    private suspend fun resolveNwcDestinationMetadataByPaymentHash(
+        transaction: WalletTransactionRow
+    ): PaymentDestinationMetadata? {
+        val paymentHash = transaction.paymentHash?.trim()?.ifBlank { null }
+            ?: transaction.txReference?.trim()?.ifBlank { null }
+            ?: return null
+        val invoice = runCatching { nwcWalletManager.lookupInvoiceByPaymentHash(paymentHash) }
+            .getOrNull()
+            ?.invoice
+            ?.trim()
+            ?.ifBlank { null }
+            ?: return null
+        return decodeInvoiceDestinationMetadata(invoice, SpendWalletSource.NWC)
+    }
+
+    private suspend fun resolveEclairDestinationMetadataByPaymentHash(
+        transaction: WalletTransactionRow
+    ): PaymentDestinationMetadata? {
+        val paymentHash = transaction.paymentHash?.trim()?.ifBlank { null }
+            ?: transaction.txReference?.trim()?.ifBlank { null }
+            ?: return null
+        return runCatching {
+            eclairWalletManager.getSentInfo(paymentHash)
+                .firstNotNullOfOrNull { info ->
+                    val invoice = info.payment?.serialized?.trim()?.ifBlank { null }
+                    if (invoice != null) {
+                        decodeInvoiceDestinationMetadata(invoice, SpendWalletSource.ECLAIR)
+                    } else {
+                        PaymentDestinationMetadata(
+                            destinationPubkey = info.payment?.nodeId?.trim()?.ifBlank { null },
+                            paymentHash = info.paymentHash?.trim()?.ifBlank { null } ?: paymentHash
+                        )
+                    }
+                }
+        }.getOrNull()
+    }
+
+    private suspend fun persistTransactionDestinationMetadata(
+        transaction: WalletTransactionRow,
+        source: SpendWalletSource
+    ) {
+        val scope = transactionMetadataScope(source) ?: return
+        val store = if (source == SpendWalletSource.SPARK) {
+            PaymentUsdSnapshotStore(getApplication())
+        } else {
+            lndPaymentUsdSnapshotStore
+        }
+        store.setDestinationMetadata(
+            walletPubkey = scope,
+            paymentId = transaction.id,
+            paymentType = if (transaction.direction == "received") "received" else "sent",
+            destinationPubkey = transaction.destinationPubkey,
+            paymentHash = transaction.paymentHash
+        )
+    }
+
+    private suspend fun transactionMetadataScope(source: SpendWalletSource): String? {
+        return when (source) {
+            SpendWalletSource.LND -> lndWalletManager.walletScopeIdentifier()
+                ?: throw LndWalletException.NoStoredNode
+            SpendWalletSource.NWC -> nwcWalletManager.walletScopeIdentifier()
+                ?: throw NwcWalletException.NoStoredConnection
+            SpendWalletSource.CORE_LIGHTNING -> coreLightningWalletManager.walletScopeIdentifier()
+                ?: throw CoreLightningWalletException.NoStoredNode
+            SpendWalletSource.ECLAIR -> eclairWalletManager.walletScopeIdentifier()
+                ?: throw EclairWalletException.NoStoredNode
+            SpendWalletSource.SPARK -> walletManager.currentWalletPubkey()
+            SpendWalletSource.SPARK_SUBWALLET -> sparkSubwalletManager.walletScopeIdentifier()
+                ?: throw SparkSubwalletException.NoStoredWallet
+        }
+    }
+
+    private fun List<WalletTransactionRow>.matchingTransaction(
+        transaction: WalletTransactionRow
+    ): WalletTransactionRow? {
+        val paymentHash = transaction.paymentHash?.trim()?.ifBlank { null }
+        val txReference = transaction.txReference?.trim()?.ifBlank { null }
+        return firstOrNull { row ->
+            row.id == transaction.id ||
+                (paymentHash != null && row.paymentHash?.trim()?.ifBlank { null } == paymentHash) ||
+                (txReference != null && row.txReference?.trim()?.ifBlank { null } == txReference)
+        }
+    }
+
+    private fun WalletTransactionRow.destinationMetadata(): PaymentDestinationMetadata {
+        return PaymentDestinationMetadata(
+            destinationPubkey = destinationPubkey?.trim()?.ifBlank { null },
+            paymentHash = paymentHash?.trim()?.ifBlank { null }
+        )
     }
 
     suspend fun currentWalletPubkey(): String {
@@ -573,11 +1501,73 @@ class SplitRootViewModel(
         return lndWalletManager.connectedNode.value ?: lndCredentialStore.activeNode()
     }
 
+    fun storedLndNodes(): List<LndNodeCredentials> {
+        return lndWalletManager.storedNodes()
+    }
+
+    fun hasStoredNwcWallet(): Boolean {
+        return nwcWalletManager.connectedWallet.value != null || nwcCredentialStore.activeWallet() != null
+    }
+
+    fun activeNwcWalletCredentials(): NwcWalletCredentials? {
+        return nwcWalletManager.connectedWallet.value ?: nwcCredentialStore.activeWallet()
+    }
+
+    fun storedNwcWallets(): List<NwcWalletCredentials> {
+        return nwcWalletManager.storedWallets()
+    }
+
+    fun hasStoredCoreLightningNode(): Boolean {
+        return coreLightningWalletManager.connectedNode.value != null ||
+            coreLightningCredentialStore.activeNode() != null
+    }
+
+    fun hasStoredEclairNode(): Boolean {
+        return eclairWalletManager.connectedNode.value != null ||
+            eclairCredentialStore.activeNode() != null
+    }
+
+    fun activeCoreLightningNodeCredentials(): CoreLightningNodeCredentials? {
+        return coreLightningWalletManager.connectedNode.value ?: coreLightningCredentialStore.activeNode()
+    }
+
+    fun activeEclairNodeCredentials(): EclairNodeCredentials? {
+        return eclairWalletManager.connectedNode.value ?: eclairCredentialStore.activeNode()
+    }
+
+    fun storedCoreLightningNodes(): List<CoreLightningNodeCredentials> {
+        return coreLightningWalletManager.storedNodes()
+    }
+
+    fun storedEclairNodes(): List<EclairNodeCredentials> {
+        return eclairWalletManager.storedNodes()
+    }
+
+    fun hasStoredSparkSubwallet(): Boolean {
+        return sparkSubwalletManager.connectedWallet.value != null ||
+            sparkSubwalletCredentialStore.activeWallet() != null
+    }
+
+    fun activeSparkSubwalletCredentials(): SparkSubwalletCredentials? {
+        return sparkSubwalletManager.connectedWallet.value ?: sparkSubwalletCredentialStore.activeWallet()
+    }
+
+    fun storedSparkSubwallets(): List<SparkSubwalletCredentials> {
+        return sparkSubwalletManager.storedWallets()
+    }
+
+    fun storedLightningWallets(): List<ExternalWalletRecord> {
+        return externalWalletStore.loadWallets()
+    }
+
     fun transactionActivityScope(source: SpendWalletSource): String {
-        return if (source == SpendWalletSource.LND) {
-            lndWalletManager.walletScopeIdentifier() ?: "lnd"
-        } else {
-            "spark"
+        return when (source) {
+            SpendWalletSource.LND -> lndWalletManager.walletScopeIdentifier() ?: "lnd"
+            SpendWalletSource.NWC -> nwcWalletManager.walletScopeIdentifier() ?: "nwc"
+            SpendWalletSource.SPARK -> "spark"
+            SpendWalletSource.CORE_LIGHTNING -> coreLightningWalletManager.walletScopeIdentifier() ?: "core-lightning"
+            SpendWalletSource.ECLAIR -> eclairWalletManager.walletScopeIdentifier() ?: "eclair"
+            SpendWalletSource.SPARK_SUBWALLET -> sparkSubwalletManager.walletScopeIdentifier() ?: "spark-subwallet"
         }
     }
 
@@ -586,9 +1576,25 @@ class SplitRootViewModel(
         notifyWalletActivity()
     }
 
+    fun warmTorForActiveWalletIfNeeded() {
+        val usesTor = when (activeSpendWalletStore.activeWallet.value) {
+            SpendWalletSource.LND -> activeLndNodeCredentials()?.usesTor == true
+            SpendWalletSource.NWC -> activeNwcWalletCredentials()?.usesTor == true
+            SpendWalletSource.CORE_LIGHTNING -> activeCoreLightningNodeCredentials()?.usesTor == true
+            SpendWalletSource.ECLAIR -> activeEclairNodeCredentials()?.usesTor == true
+            SpendWalletSource.SPARK,
+            SpendWalletSource.SPARK_SUBWALLET -> false
+        }
+
+        if (usesTor) {
+            RemoteNodeTorTransport.warmUp(getApplication(), viewModelScope)
+        }
+    }
+
     fun setLndSpendWalletIfAvailable(): Boolean {
         val didActivate = activeSpendWalletStore.setLndActiveIfAvailable()
         if (didActivate) {
+            warmTorForActiveWalletIfNeeded()
             launchGuarded("setLndSpendWalletIfAvailable") {
                 if (!lndWalletManager.isConnected) {
                     lndWalletManager.restoreActiveNode()
@@ -602,20 +1608,261 @@ class SplitRootViewModel(
         return didActivate
     }
 
+    fun setLndSpendWallet(id: String): Boolean {
+        val didActivate = activeSpendWalletStore.setLndActive(id)
+        if (didActivate) {
+            warmTorForActiveWalletIfNeeded()
+            launchGuarded("setLndSpendWallet") {
+                lndWalletManager.setActiveStoredNode(id)
+                lndWalletManager.refreshBalance()
+                notifyWalletActivity()
+            }
+        } else {
+            notifyWalletActivity()
+        }
+        return didActivate
+    }
+
+    fun setNwcSpendWallet(id: String): Boolean {
+        val didActivate = activeSpendWalletStore.setNwcActive(id)
+        if (didActivate) {
+            warmTorForActiveWalletIfNeeded()
+            launchGuarded("setNwcSpendWallet") {
+                nwcWalletManager.setActiveStoredWallet(id)
+                nwcWalletManager.refreshBalance()
+                notifyWalletActivity()
+            }
+        } else {
+            notifyWalletActivity()
+        }
+        return didActivate
+    }
+
+    fun setCoreLightningSpendWallet(id: String): Boolean {
+        val didActivate = activeSpendWalletStore.setCoreLightningActive(id)
+        if (didActivate) {
+            warmTorForActiveWalletIfNeeded()
+            launchGuarded("setCoreLightningSpendWallet") {
+                coreLightningWalletManager.setActiveStoredNode(id)
+                coreLightningWalletManager.refreshBalance()
+                notifyWalletActivity()
+            }
+        } else {
+            notifyWalletActivity()
+        }
+        return didActivate
+    }
+
+    fun setEclairSpendWallet(id: String): Boolean {
+        val didActivate = activeSpendWalletStore.setEclairActive(id)
+        if (didActivate) {
+            warmTorForActiveWalletIfNeeded()
+            launchGuarded("setEclairSpendWallet") {
+                eclairWalletManager.setActiveStoredNode(id)
+                eclairWalletManager.refreshBalance()
+                notifyWalletActivity()
+            }
+        } else {
+            notifyWalletActivity()
+        }
+        return didActivate
+    }
+
+    fun setSparkSubwalletSpendWallet(id: String): Boolean {
+        val didActivate = activeSpendWalletStore.setSparkSubwalletActive(id)
+        if (didActivate) {
+            launchGuarded("setSparkSubwalletSpendWallet") {
+                sparkSubwalletManager.setActiveStoredWallet(id)
+                sparkSubwalletManager.refreshBalance()
+                notifyWalletActivity()
+            }
+        } else {
+            notifyWalletActivity()
+        }
+        return didActivate
+    }
+
     fun setLndInvoiceListenerActive(active: Boolean) {
         lndWalletManager.setInvoiceListenerActive(active)
     }
 
-    suspend fun connectLndNode(lndConnectString: String): LndNodeCredentials {
-        val node = lndWalletManager.connect(lndConnectString)
+    fun setNwcNotificationListenerActive(active: Boolean) {
+        nwcWalletManager.setNotificationListenerActive(active)
+    }
+
+    suspend fun connectLndNode(
+        lndConnectString: String,
+        label: String? = null
+    ): LndNodeCredentials {
+        val node = lndWalletManager.connect(lndConnectString, label)
         activeSpendWalletStore.setLndActiveIfAvailable()
         notifyWalletActivity()
         return node
     }
 
+    suspend fun connectNwcWallet(
+        nwcConnectionString: String,
+        label: String? = null
+    ): NwcWalletCredentials {
+        val wallet = nwcWalletManager.connect(nwcConnectionString, label)
+        activeSpendWalletStore.setNwcActive(wallet.id)
+        notifyWalletActivity()
+        return wallet
+    }
+
+    suspend fun connectCoreLightningNode(
+        connectionString: String,
+        label: String? = null
+    ): CoreLightningNodeCredentials {
+        val node = coreLightningWalletManager.connect(connectionString, label)
+        activeSpendWalletStore.setCoreLightningActive(node.id)
+        notifyWalletActivity()
+        return node
+    }
+
+    suspend fun connectEclairNode(
+        scheme: String,
+        host: String,
+        port: Int,
+        apiPassword: String,
+        label: String? = null
+    ): EclairNodeCredentials {
+        val node = eclairWalletManager.connect(scheme, host, port, apiPassword, label)
+        activeSpendWalletStore.setEclairActive(node.id)
+        notifyWalletActivity()
+        return node
+    }
+
+    suspend fun connectEclairNode(
+        connectionString: String,
+        label: String? = null
+    ): EclairNodeCredentials {
+        val node = eclairWalletManager.connect(connectionString, label)
+        activeSpendWalletStore.setEclairActive(node.id)
+        notifyWalletActivity()
+        return node
+    }
+
+    suspend fun restoreNwcWallet() {
+        nwcWalletManager.restoreActiveWallet()
+        notifyWalletActivity()
+    }
+
+    suspend fun refreshNwcConnection() {
+        nwcWalletManager.refreshWalletInfo()
+        nwcWalletManager.refreshBalance()
+        notifyWalletActivity()
+    }
+
+    suspend fun restoreCoreLightningNode() {
+        coreLightningWalletManager.restoreActiveNode()
+        activeSpendWalletStore.reconcileWithStoredWallets()
+        notifyWalletActivity()
+    }
+
+    suspend fun refreshCoreLightningConnection() {
+        coreLightningWalletManager.refreshNodeInfo()
+        coreLightningWalletManager.refreshBalance()
+        notifyWalletActivity()
+    }
+
+    fun forgetCoreLightningNode(id: String) {
+        coreLightningWalletManager.forgetNode(id)
+        activeSpendWalletStore.reconcileWithStoredWallets()
+        notifyWalletActivity()
+    }
+
+    fun renameCoreLightningNode(id: String, label: String) {
+        coreLightningWalletManager.renameNode(id, label)
+        notifyWalletActivity()
+    }
+
+    suspend fun restoreEclairNode() {
+        eclairWalletManager.restoreActiveNode()
+        activeSpendWalletStore.reconcileWithStoredWallets()
+        notifyWalletActivity()
+    }
+
+    suspend fun refreshEclairConnection() {
+        eclairWalletManager.refreshNodeInfo()
+        eclairWalletManager.refreshBalance()
+        notifyWalletActivity()
+    }
+
+    fun forgetEclairNode(id: String) {
+        eclairWalletManager.forgetNode(id)
+        activeSpendWalletStore.reconcileWithStoredWallets()
+        notifyWalletActivity()
+    }
+
+    fun renameEclairNode(id: String, label: String) {
+        eclairWalletManager.renameNode(id, label)
+        notifyWalletActivity()
+    }
+
+    fun createPendingSparkSubwalletSeed() {
+        sparkSubwalletManager.createPendingWalletSeed()
+    }
+
+    fun cancelPendingSparkSubwalletSeed() {
+        sparkSubwalletManager.cancelPendingWalletSeed()
+    }
+
+    suspend fun createSparkSubwallet(label: String): SparkSubwalletCredentials {
+        val wallet = sparkSubwalletManager.createWallet(label)
+        activeSpendWalletStore.setSparkSubwalletActive(wallet.id)
+        notifyWalletActivity()
+        return wallet
+    }
+
+    suspend fun restoreSparkSubwallet(
+        seedPhrase: String,
+        label: String
+    ): SparkSubwalletCredentials {
+        val wallet = sparkSubwalletManager.restoreWallet(seedPhrase = seedPhrase, label = label)
+        activeSpendWalletStore.setSparkSubwalletActive(wallet.id)
+        notifyWalletActivity()
+        return wallet
+    }
+
+    suspend fun restoreSparkSubwallet(id: String? = null) {
+        sparkSubwalletManager.restoreWalletIfNeeded(id)
+        activeSpendWalletStore.reconcileWithStoredWallets()
+        notifyWalletActivity()
+    }
+
+    suspend fun refreshSparkSubwalletConnection() {
+        sparkSubwalletManager.refreshBalance()
+        notifyWalletActivity()
+    }
+
+    fun forgetSparkSubwallet(id: String) {
+        launchGuarded("forgetSparkSubwallet") {
+            sparkSubwalletManager.forgetWallet(id)
+            lndPaymentUsdSnapshotStore.clearWallet("spark-subwallet:$id")
+            activeSpendWalletStore.reconcileWithStoredWallets()
+            notifyWalletActivity()
+        }
+    }
+
+    fun renameSparkSubwallet(id: String, label: String) {
+        sparkSubwalletManager.renameWallet(id, label)
+        notifyWalletActivity()
+    }
+
+    fun forgetNwcWallet(id: String) {
+        nwcWalletManager.forgetWallet(id)
+        notifyWalletActivity()
+    }
+
+    fun renameNwcWallet(id: String, label: String) {
+        nwcWalletManager.renameWallet(id, label)
+        notifyWalletActivity()
+    }
+
     suspend fun restoreLndNode() {
         lndWalletManager.restoreActiveNode()
-        activeSpendWalletStore.reconcileWithStoredNode()
+        activeSpendWalletStore.reconcileWithStoredWallets()
         notifyWalletActivity()
     }
 
@@ -627,7 +1874,12 @@ class SplitRootViewModel(
 
     fun forgetLndNode(id: String) {
         lndWalletManager.forgetNode(id)
-        activeSpendWalletStore.reconcileWithStoredNode()
+        activeSpendWalletStore.reconcileWithStoredWallets()
+        notifyWalletActivity()
+    }
+
+    fun renameLndNode(id: String, label: String) {
+        lndWalletManager.renameNode(id, label)
         notifyWalletActivity()
     }
 
@@ -1045,10 +2297,142 @@ class SplitRootViewModel(
 
         walletManager.showOutgoingPaymentSuccess()
         notifyWalletActivity()
-        launchLndPostSendReconciliation(preview)
+        launchLndPostSendReconciliation(
+            preview = preview,
+            paidPaymentHash = response.paymentHash
+        )
     }
 
-    private fun launchLndPostSendReconciliation(preview: PaymentPreview) {
+    private suspend fun sendPreparedNwcPayment(preview: PaymentPreview) = withContext(NonCancellable) {
+        Log.i(
+            "SplitRootViewModel",
+            "Starting NWC send paymentHash=${preview.paymentHash ?: "unknown"} amountSats=${preview.amountSats}"
+        )
+
+        if (!nwcWalletManager.isConnected) {
+            nwcWalletManager.restoreActiveWallet()
+        }
+
+        nwcWalletManager.payInvoice(
+            bolt11 = preview.destination,
+            amountSats = preview.lndAmountOverrideSats
+        )
+
+        walletManager.showOutgoingPaymentSuccess()
+        notifyWalletActivity()
+        launchNwcPostSendReconciliation(preview = preview)
+    }
+
+    private suspend fun sendPreparedCoreLightningPayment(preview: PaymentPreview) = withContext(NonCancellable) {
+        Log.i(
+            "SplitRootViewModel",
+            "Starting Core Lightning send paymentHash=${preview.paymentHash ?: "unknown"} amountSats=${preview.amountSats}"
+        )
+
+        if (!coreLightningWalletManager.isConnected) {
+            coreLightningWalletManager.restoreActiveNode()
+        }
+
+        val response = coreLightningWalletManager.payInvoice(
+            bolt11 = preview.destination,
+            amountSats = preview.lndAmountOverrideSats
+        )
+
+        if (!response.didSucceed) {
+            Log.w(
+                "SplitRootViewModel",
+                "Core Lightning send reported status=${response.status ?: "unknown"}"
+            )
+            throw CoreLightningWalletException.PaymentFailed
+        }
+
+        walletManager.showOutgoingPaymentSuccess()
+        notifyWalletActivity()
+        launchCoreLightningPostSendReconciliation(
+            preview = preview,
+            paidPaymentHash = response.paymentHash
+        )
+    }
+
+    private suspend fun sendPreparedEclairPayment(preview: PaymentPreview) = withContext(NonCancellable) {
+        Log.i(
+            "SplitRootViewModel",
+            "Starting Eclair send paymentHash=${preview.paymentHash ?: "unknown"} amountSats=${preview.amountSats}"
+        )
+
+        if (!eclairWalletManager.isConnected) {
+            eclairWalletManager.restoreActiveNode()
+        }
+
+        val response = eclairWalletManager.payInvoice(
+            bolt11 = preview.destination,
+            amountSats = preview.lndAmountOverrideSats
+        )
+
+        if (!response.didSucceed) {
+            Log.w(
+                "SplitRootViewModel",
+                "Eclair send reported failure. ${response.failureMessage ?: "Payment failed."}"
+            )
+            throw EclairWalletException.PaymentFailed(response.failureMessage)
+        }
+
+        walletManager.showOutgoingPaymentSuccess()
+        notifyWalletActivity()
+        launchEclairPostSendReconciliation(
+            preview = preview,
+            paidPaymentHash = response.paymentHash
+        )
+    }
+
+    private suspend fun sendPreparedSparkSubwalletPayment(
+        preparedPayment: PreparedOutgoingPayment
+    ) = withContext(NonCancellable) {
+        val preview = preparedPayment.preview
+        Log.i(
+            "SplitRootViewModel",
+            "Starting Spark sub-wallet send paymentHash=${preview.paymentHash ?: "unknown"} amountSats=${preview.amountSats}"
+        )
+
+        if (!sparkSubwalletManager.isConnected) {
+            sparkSubwalletManager.restoreWalletIfNeeded()
+        }
+
+        when (val result = sparkSubwalletManager.sendPreparedPayment(preparedPayment)) {
+            is PreparedOutgoingPaymentSendResult.Completed -> {
+                walletManager.suppressOutgoingSuccessToastForPayment(result.paymentId)
+                walletManager.showOutgoingPaymentSuccess()
+                notifyWalletActivity()
+                launchSparkSubwalletPostSendReconciliation(
+                    preview = preview,
+                    paidPaymentId = result.paymentId
+                )
+            }
+
+            is PreparedOutgoingPaymentSendResult.Pending -> {
+                result.paymentId?.let(walletManager::suppressOutgoingSuccessToastForPayment)
+                notifyWalletActivity()
+                launchSparkSubwalletPostSendReconciliation(
+                    preview = preview,
+                    paidPaymentId = result.paymentId
+                )
+            }
+
+            is PreparedOutgoingPaymentSendResult.Failed -> {
+                result.paymentId?.let(walletManager::suppressOutgoingFailureToastForPayment)
+                val message = result.message?.trim().orEmpty().ifBlank {
+                    "Unable to send payment."
+                }
+                walletManager.showOutgoingPaymentFailure(subtitle = message)
+                throw IllegalStateException(message)
+            }
+        }
+    }
+
+    private fun launchLndPostSendReconciliation(
+        preview: PaymentPreview,
+        paidPaymentHash: String?
+    ) {
         viewModelScope.launch {
             runCatching {
                 val rows = lndWalletManager.fetchTransactionRows()
@@ -1081,6 +2465,8 @@ class SplitRootViewModel(
                     destinationPubkey = preview.destinationPubkey,
                     network = "lightning",
                     status = "Completed",
+                    paymentHash = paidPaymentHash?.trim()?.ifBlank { null }
+                        ?: preview.paymentHash?.trim()?.ifBlank { null },
                     authManager = authManager,
                     walletManager = walletManager
                 )
@@ -1094,9 +2480,228 @@ class SplitRootViewModel(
         }
     }
 
+    private fun launchNwcPostSendReconciliation(preview: PaymentPreview) {
+        viewModelScope.launch {
+            runCatching {
+                val rows = nwcWalletManager.fetchTransactionRows()
+                ensureExternalUsdSnapshots(
+                    transactions = rows,
+                    scope = nwcWalletManager.walletScopeIdentifier() ?: return@runCatching
+                )
+                notifyWalletActivity()
+            }.onFailure { error ->
+                Log.w(
+                    "SplitRootViewModel",
+                    "Failed to refresh NWC transactions after send. ${error.localizedMessage}",
+                    error
+                )
+            }
+
+            runCatching {
+                nwcWalletManager.refreshBalance()
+            }.onFailure { error ->
+                Log.w(
+                    "SplitRootViewModel",
+                    "Failed to refresh NWC balance after send. ${error.localizedMessage}",
+                    error
+                )
+            }
+
+            runCatching {
+                val usdAmountCents = lndRewardSpendUsdCents(preview.amountSats)
+                rewardsRepository.postRewardSpend(
+                    direction = "sent",
+                    usdAmountCents = usdAmountCents,
+                    btcAmountSats = preview.amountSats,
+                    destinationPubkey = preview.destinationPubkey,
+                    network = "lightning",
+                    status = "Completed",
+                    paymentHash = preview.paymentHash?.trim()?.ifBlank { null },
+                    authManager = authManager,
+                    walletManager = walletManager
+                )
+            }.onFailure { error ->
+                Log.w(
+                    "SplitRootViewModel",
+                    "Failed to post NWC reward spend. ${error.localizedMessage}",
+                    error
+                )
+            }
+        }
+    }
+
+    private fun launchCoreLightningPostSendReconciliation(
+        preview: PaymentPreview,
+        paidPaymentHash: String?
+    ) {
+        viewModelScope.launch {
+            runCatching {
+                val rows = coreLightningWalletManager.fetchTransactionRows()
+                ensureExternalUsdSnapshots(
+                    transactions = rows,
+                    scope = coreLightningWalletManager.walletScopeIdentifier() ?: return@runCatching
+                )
+                notifyWalletActivity()
+            }.onFailure { error ->
+                Log.w(
+                    "SplitRootViewModel",
+                    "Failed to refresh Core Lightning transactions after send. ${error.localizedMessage}",
+                    error
+                )
+            }
+
+            runCatching {
+                coreLightningWalletManager.refreshBalance()
+            }.onFailure { error ->
+                Log.w(
+                    "SplitRootViewModel",
+                    "Failed to refresh Core Lightning balance after send. ${error.localizedMessage}",
+                    error
+                )
+            }
+
+            runCatching {
+                val usdAmountCents = lndRewardSpendUsdCents(preview.amountSats)
+                rewardsRepository.postRewardSpend(
+                    direction = "sent",
+                    usdAmountCents = usdAmountCents,
+                    btcAmountSats = preview.amountSats,
+                    destinationPubkey = preview.destinationPubkey,
+                    network = "lightning",
+                    status = "Completed",
+                    paymentHash = paidPaymentHash?.trim()?.ifBlank { null }
+                        ?: preview.paymentHash?.trim()?.ifBlank { null },
+                    authManager = authManager,
+                    walletManager = walletManager
+                )
+            }.onFailure { error ->
+                Log.w(
+                    "SplitRootViewModel",
+                    "Failed to post Core Lightning reward spend. ${error.localizedMessage}",
+                    error
+                )
+            }
+        }
+    }
+
+    private fun launchEclairPostSendReconciliation(
+        preview: PaymentPreview,
+        paidPaymentHash: String?
+    ) {
+        viewModelScope.launch {
+            runCatching {
+                val rows = eclairWalletManager.fetchTransactionRows()
+                ensureExternalUsdSnapshots(
+                    transactions = rows,
+                    scope = eclairWalletManager.walletScopeIdentifier() ?: return@runCatching
+                )
+                notifyWalletActivity()
+            }.onFailure { error ->
+                Log.w(
+                    "SplitRootViewModel",
+                    "Failed to refresh Eclair transactions after send. ${error.localizedMessage}",
+                    error
+                )
+            }
+
+            runCatching {
+                eclairWalletManager.refreshBalance()
+            }.onFailure { error ->
+                Log.w(
+                    "SplitRootViewModel",
+                    "Failed to refresh Eclair balance after send. ${error.localizedMessage}",
+                    error
+                )
+            }
+
+            runCatching {
+                val usdAmountCents = lndRewardSpendUsdCents(preview.amountSats)
+                rewardsRepository.postRewardSpend(
+                    direction = "sent",
+                    usdAmountCents = usdAmountCents,
+                    btcAmountSats = preview.amountSats,
+                    destinationPubkey = preview.destinationPubkey,
+                    network = "lightning",
+                    status = "Completed",
+                    paymentHash = paidPaymentHash?.trim()?.ifBlank { null }
+                        ?: preview.paymentHash?.trim()?.ifBlank { null },
+                    authManager = authManager,
+                    walletManager = walletManager
+                )
+            }.onFailure { error ->
+                Log.w(
+                    "SplitRootViewModel",
+                    "Failed to post Eclair reward spend. ${error.localizedMessage}",
+                    error
+                )
+            }
+        }
+    }
+
+    private fun launchSparkSubwalletPostSendReconciliation(
+        preview: PaymentPreview,
+        paidPaymentId: String?
+    ) {
+        viewModelScope.launch {
+            runCatching {
+                val rows = sparkSubwalletManager.fetchTransactionRows()
+                ensureExternalUsdSnapshots(
+                    transactions = rows,
+                    scope = sparkSubwalletManager.walletScopeIdentifier() ?: return@runCatching
+                )
+                notifyWalletActivity()
+            }.onFailure { error ->
+                Log.w(
+                    "SplitRootViewModel",
+                    "Failed to refresh Spark sub-wallet transactions after send. ${error.localizedMessage}",
+                    error
+                )
+            }
+
+            runCatching {
+                sparkSubwalletManager.refreshBalance()
+            }.onFailure { error ->
+                Log.w(
+                    "SplitRootViewModel",
+                    "Failed to refresh Spark sub-wallet balance after send. ${error.localizedMessage}",
+                    error
+                )
+            }
+
+            runCatching {
+                val usdAmountCents = lndRewardSpendUsdCents(preview.amountSats)
+                rewardsRepository.postRewardSpend(
+                    direction = "sent",
+                    usdAmountCents = usdAmountCents,
+                    btcAmountSats = preview.amountSats,
+                    destinationPubkey = preview.destinationPubkey,
+                    network = "lightning",
+                    status = "Completed",
+                    paymentHash = preview.paymentHash?.trim()?.ifBlank { null }
+                        ?: paidPaymentId?.trim()?.ifBlank { null },
+                    authManager = authManager,
+                    walletManager = walletManager
+                )
+            }.onFailure { error ->
+                Log.w(
+                    "SplitRootViewModel",
+                    "Failed to post Spark sub-wallet reward spend. ${error.localizedMessage}",
+                    error
+                )
+            }
+        }
+    }
+
     private suspend fun ensureLndUsdSnapshots(rows: List<WalletTransactionRow>) {
         val scope = lndWalletManager.walletScopeIdentifier() ?: return
-        val completedRows = rows
+        ensureExternalUsdSnapshots(rows, scope)
+    }
+
+    private suspend fun ensureExternalUsdSnapshots(
+        transactions: List<WalletTransactionRow>,
+        scope: String
+    ) {
+        val completedRows = transactions
             .filter { row ->
                 row.status == "Completed" &&
                     (row.direction == "sent" || row.direction == "received") &&
@@ -1105,6 +2710,14 @@ class SplitRootViewModel(
             .sortedBy { it.transactionTimestampMillis }
 
         for (row in completedRows) {
+            lndPaymentUsdSnapshotStore.setDestinationMetadata(
+                walletPubkey = scope,
+                paymentId = row.id,
+                paymentType = if (row.direction == "received") "received" else "sent",
+                destinationPubkey = row.destinationPubkey,
+                paymentHash = row.paymentHash
+            )
+
             if (lndPaymentUsdSnapshotStore.containsSnapshot(scope, row.id)) {
                 continue
             }

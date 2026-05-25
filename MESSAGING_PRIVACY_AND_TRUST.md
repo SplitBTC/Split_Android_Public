@@ -1,6 +1,6 @@
 # Split Messaging Privacy and Trust
 
-This document describes the current Split messaging system as implemented in the Split backend and Android client.
+This document describes the current Split messaging system as implemented in the Split backend and iOS client.
 
 It is written for technical users who care about privacy, trust minimization, and honest threat-model boundaries.
 
@@ -66,7 +66,7 @@ The backend verifies that signature before accepting the identity update.
 
 For v2:
 
-- the Android client derives `walletPubkey` and `lightningAddress` locally from the wallet SDK
+- the iOS client derives `walletPubkey` and `lightningAddress` locally from the wallet SDK
 - the client creates or restores its messaging private key locally
 - the wallet signs the binding locally
 - the backend stores the verified binding and updates its cached user record from that signed binding
@@ -114,7 +114,7 @@ For current v2 sends:
    - ChaCha20-Poly1305
 3. The relay receives the outer routing payload and ciphertext.
 
-On receipt, the Android client:
+On receipt, the iOS client:
 
 1. decrypts the sealed payload
 2. verifies the sender's binding
@@ -131,9 +131,9 @@ Attachment decryption metadata rides inside the encrypted message body.
 
 ### 5. Local storage and backup
 
-On Android:
+On iOS:
 
-- the messaging private key is stored in `EncryptedSharedPreferences`
+- the messaging private key is stored in the keychain
 - the local message store is encrypted at rest
 - cached attachment files are encrypted at rest
 
@@ -147,7 +147,7 @@ Important nuance:
 
 ## What the Client Verifies
 
-The Android client does not simply trust relay assertions.
+The iOS client does not simply trust relay assertions.
 
 It verifies:
 
@@ -183,15 +183,15 @@ Today the relay can learn:
 
 This is **not** a metadata-hiding system.
 
-## What Google Still Learns
+## What Apple / Google Still Learn
 
-If push notifications are enabled, Google will also learn that:
+If push notifications are enabled, Apple and/or Google will also learn that:
 
 - the Split app received a push notification
 - at a particular time
 - for a particular device token
 
-Current FCM-backed messaging notifications use a generic visible notification:
+Current APNs messaging pushes use a generic visible notification:
 
 - title: `Split`
 - body: `New message`
@@ -233,7 +233,7 @@ This is stronger than the earlier opportunistic-only cleanup model.
 - Recipient identity is client-verified rather than blindly trusted from the relay.
 - The wallet, not the server, authorizes the identity binding between wallet pubkey, Lightning address, and messaging key.
 - The server does not hold the user's messaging private key in plaintext.
-- Local message and attachment caches are encrypted at rest on Android.
+- Local message and attachment caches are encrypted at rest on iOS.
 
 ## Weaknesses and Residual Trust
 
@@ -297,7 +297,7 @@ It does not make a fully compromised unlocked device safe.
 
 ## Optional Signed Contact Cards
 
-The Android app also supports a signed `split-contact:` payload format for out-of-band contact sharing.
+The iOS app also supports a signed `split-contact:` payload format for out-of-band contact sharing.
 
 That is useful as a signed contact-card format.
 

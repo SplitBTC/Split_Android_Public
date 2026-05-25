@@ -7,8 +7,10 @@ This app includes:
 - self-custodial wallet flows through Breez Spark
 - Lightning address management and wallet-authenticated backend sessions
 - Split messaging with contacts, inbox/thread views, attachments, and push sync
-- rewards, merchant discovery, merchant reporting, and map flows
-- Proof of Spend posting, profile, legal, and support surfaces
+- rewards, coupons, merchant discovery, merchant reporting, and map flows
+- Bitcoin event discovery
+- external Lightning node, Nostr Wallet Connect, and Spark subwallet flows
+- profile, legal, and support surfaces
 
 ## Why This Project Exists
 
@@ -30,7 +32,7 @@ The Android client may lag the private `Split Android` repo and may lag the iOS 
 
 - Android Studio current stable recommended
 - JDK `17`
-- Android SDK components for `compileSdk 36`
+- Android SDK components for `compileSdk 37`
 - a physical Android device if you want to test on hardware
 
 ## Opening the Project
@@ -93,7 +95,7 @@ Important notes:
 - release defaults to `https://example.invalid`
 - Firebase setup is optional for local builds; add your own `app/google-services.json` if you want FCM push behavior
 - this public repo intentionally does not commit a real Firebase config file
-- the generated Android namespace is intentionally placeholder-based in this public mirror
+- the Android application ID is intentionally placeholder-based in this public mirror
 - the in-app legal screen expects hosted documents from `BASE_URL`; with the committed public defaults it will intentionally show a placeholder notice instead of loading fake legal pages
 - placeholder values are expected for backend hosts, support contacts, application identifiers, and messaging/lightning domains
 
@@ -105,7 +107,9 @@ If you are not an authorized developer working against Split infrastructure, poi
 - [AppConfig.kt](./app/src/main/java/com/split/android/core/AppConfig.kt): runtime configuration surface
 - [SplitRootViewModel.kt](./app/src/main/java/com/split/android/ui/SplitRootViewModel.kt): top-level orchestration for wallet, auth, messaging, rewards, and profile flows
 - [data/messages](./app/src/main/java/com/split/android/data/messages): messaging identity, sync, crypto, storage, and push plumbing
-- [data/wallet](./app/src/main/java/com/split/android/data/wallet): Breez Spark wallet lifecycle and payment flows
+- [data/wallet](./app/src/main/java/com/split/android/data/wallet): Breez Spark, remote Lightning node, NWC, Spark subwallet, and payment flows
+- [data/coupons](./app/src/main/java/com/split/android/data/coupons): nearby coupon calls
+- [data/events](./app/src/main/java/com/split/android/data/events): Bitcoin event calls
 - [ui](./app/src/main/java/com/split/android/ui): Compose screens and theme
 
 ## Testing

@@ -10,6 +10,7 @@ import android.widget.Toast
 import androidx.activity.compose.BackHandler
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
+import androidx.compose.foundation.Image
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
@@ -47,13 +48,15 @@ import androidx.compose.material.icons.rounded.Check
 import androidx.compose.material.icons.rounded.Bolt
 import androidx.compose.material.icons.rounded.ChevronRight
 import androidx.compose.material.icons.rounded.ContentCopy
-import androidx.compose.material.icons.rounded.Image
+import androidx.compose.material.icons.rounded.KeyboardArrowDown
 import androidx.compose.material3.ButtonDefaults
 import androidx.compose.material3.Button
 import androidx.compose.material3.CircularProgressIndicator
+import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
+import androidx.compose.material3.ModalBottomSheet
 import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Switch
@@ -75,6 +78,7 @@ import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalFocusManager
+import androidx.compose.ui.res.painterResource
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.input.ImeAction
 import androidx.compose.ui.text.style.TextAlign
@@ -82,7 +86,9 @@ import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import coil.compose.AsyncImage
+import com.split.android.R
 import com.split.android.ui.SplitFeatureIcons
+import com.split.android.ui.NwcSymbolIcon
 import com.split.android.data.wallet.TransactionActivityTracker
 import com.split.android.data.wallet.SpendWalletSource
 import com.split.android.data.wallet.WalletTransactionRow
@@ -95,6 +101,8 @@ import kotlinx.coroutines.launch
 @Composable
 fun WalletTransactionsScreen(
     rootViewModel: SplitRootViewModel,
+    walletMenuItems: List<SpendWalletMenuItem>,
+    onSelectWalletMenuItem: (SpendWalletMenuItem) -> Unit,
     onDismiss: () -> Unit
 ) {
     val context = LocalContext.current
@@ -104,13 +112,22 @@ fun WalletTransactionsScreen(
     val walletEventVersion by rootViewModel.walletEventVersion.collectAsStateWithLifecycle()
     val activeSpendWallet by rootViewModel.activeSpendWallet.collectAsStateWithLifecycle()
     val connectedLndNode by rootViewModel.connectedLndNode.collectAsStateWithLifecycle()
+    val connectedNwcWallet by rootViewModel.connectedNwcWallet.collectAsStateWithLifecycle()
+    val connectedCoreLightningNode by rootViewModel.connectedCoreLightningNode.collectAsStateWithLifecycle()
+    val connectedEclairNode by rootViewModel.connectedEclairNode.collectAsStateWithLifecycle()
+    val connectedSparkSubwallet by rootViewModel.connectedSparkSubwallet.collectAsStateWithLifecycle()
     val hasStoredNode = connectedLndNode != null || rootViewModel.hasStoredLndNode()
+    val hasStoredNwcWallet = connectedNwcWallet != null || rootViewModel.hasStoredNwcWallet()
+    val hasStoredCoreLightningNode = connectedCoreLightningNode != null || rootViewModel.hasStoredCoreLightningNode()
+    val hasStoredEclairNode = connectedEclairNode != null || rootViewModel.hasStoredEclairNode()
+    val hasStoredSparkSubwallet = connectedSparkSubwallet != null || rootViewModel.hasStoredSparkSubwallet()
 
     var isLoading by remember { mutableStateOf(true) }
     var errorMessage by remember { mutableStateOf<String?>(null) }
     var transactions by remember { mutableStateOf<List<WalletTransactionRow>>(emptyList()) }
     var selectedTransactionSource by remember { mutableStateOf(activeSpendWallet) }
     var displayedTransactionSource by remember { mutableStateOf(activeSpendWallet) }
+    var selectedTransactionWalletKey by rememberSaveable { mutableStateOf<String?>(null) }
     var didSeedInitialTransactionSource by remember { mutableStateOf(false) }
     var highlightedTransactionIds by remember { mutableStateOf<Set<String>>(emptySet()) }
     var selectedTransaction by remember { mutableStateOf<WalletTransactionRow?>(null) }
@@ -118,31 +135,79 @@ fun WalletTransactionsScreen(
     var reportableTransaction by remember { mutableStateOf<WalletTransactionRow?>(null) }
     var reportableTransactionIds by remember { mutableStateOf<Set<String>>(emptySet()) }
     var isPresentingExport by remember { mutableStateOf(false) }
+    var showTransactionWalletPicker by remember { mutableStateOf(false) }
     var latestLoadRequestId by remember { mutableStateOf(0L) }
+    val coroutineScope = rememberCoroutineScope()
+    val rootWalletMenuItem = remember(walletMenuItems) {
+        walletMenuItems.firstOrNull { it.source == SpendWalletSource.SPARK }
+    }
+    val selectedWalletMenuItem = remember(walletMenuItems, selectedTransactionWalletKey, selectedTransactionSource) {
+        val key = selectedTransactionWalletKey
+        walletMenuItems.firstOrNull { walletMenuItemKey(it) == key }
+            ?: walletMenuItems.firstOrNull { it.source == selectedTransactionSource }
+            ?: rootWalletMenuItem
+            ?: walletMenuItems.firstOrNull()
+    }
 
-    LaunchedEffect(activeSpendWallet, hasStoredNode, didSeedInitialTransactionSource) {
+    LaunchedEffect(
+        activeSpendWallet,
+        hasStoredNode,
+        hasStoredNwcWallet,
+        hasStoredCoreLightningNode,
+        hasStoredEclairNode,
+        hasStoredSparkSubwallet,
+        didSeedInitialTransactionSource
+    ) {
         if (!didSeedInitialTransactionSource) {
-            selectedTransactionSource = if (activeSpendWallet == SpendWalletSource.LND && hasStoredNode) {
-                SpendWalletSource.LND
-            } else {
-                SpendWalletSource.SPARK
-            }
+            val initialWallet = walletMenuItems.firstOrNull { it.isActive }
+                ?: rootWalletMenuItem
+                ?: walletMenuItems.firstOrNull()
+                ?: return@LaunchedEffect
+            selectedTransactionWalletKey = walletMenuItemKey(initialWallet)
+            selectedTransactionSource = initialWallet.source
             displayedTransactionSource = selectedTransactionSource
             didSeedInitialTransactionSource = true
         }
     }
 
-    LaunchedEffect(walletEventVersion, selectedTransactionSource, hasStoredNode, didSeedInitialTransactionSource) {
+    LaunchedEffect(
+        walletEventVersion,
+        selectedTransactionWalletKey,
+        selectedTransactionSource,
+        walletMenuItems,
+        hasStoredNode,
+        hasStoredNwcWallet,
+        hasStoredCoreLightningNode,
+        hasStoredEclairNode,
+        hasStoredSparkSubwallet,
+        didSeedInitialTransactionSource
+    ) {
         if (!didSeedInitialTransactionSource) return@LaunchedEffect
-        if (selectedTransactionSource == SpendWalletSource.LND && !hasStoredNode) {
+        val requestedWallet = selectedTransactionWalletKey
+            ?.let { key -> walletMenuItems.firstOrNull { walletMenuItemKey(it) == key } }
+            ?: rootWalletMenuItem
+
+        if (requestedWallet == null) {
+            return@LaunchedEffect
+        }
+
+        if (walletMenuItemKey(requestedWallet) != selectedTransactionWalletKey ||
+            (requestedWallet.source == SpendWalletSource.LND && !hasStoredNode) ||
+            (requestedWallet.source == SpendWalletSource.NWC && !hasStoredNwcWallet) ||
+            (requestedWallet.source == SpendWalletSource.CORE_LIGHTNING && !hasStoredCoreLightningNode) ||
+            (requestedWallet.source == SpendWalletSource.ECLAIR && !hasStoredEclairNode) ||
+            (requestedWallet.source == SpendWalletSource.SPARK_SUBWALLET && !hasStoredSparkSubwallet)
+        ) {
             selectedTransactionSource = SpendWalletSource.SPARK
             displayedTransactionSource = SpendWalletSource.SPARK
+            rootWalletMenuItem?.let { selectedTransactionWalletKey = walletMenuItemKey(it) }
             return@LaunchedEffect
         }
 
         isLoading = true
         errorMessage = null
-        val requestedSource = selectedTransactionSource
+        val requestedSource = requestedWallet.source
+        selectedTransactionSource = requestedSource
         latestLoadRequestId += 1L
         val loadRequestId = latestLoadRequestId
 
@@ -236,6 +301,20 @@ fun WalletTransactionsScreen(
         return
     }
 
+    fun selectTransactionWallet(item: SpendWalletMenuItem) {
+        val key = walletMenuItemKey(item)
+        showTransactionWalletPicker = false
+        if (key == selectedTransactionWalletKey) return
+
+        onSelectWalletMenuItem(item)
+        selectedTransactionWalletKey = key
+        selectedTransactionSource = item.source
+        transactions = emptyList()
+        highlightedTransactionIds = emptySet()
+        reportableTransactionIds = emptySet()
+        errorMessage = null
+    }
+
     Box(
         modifier = Modifier
             .fillMaxSize()
@@ -262,19 +341,10 @@ fun WalletTransactionsScreen(
                 }
             )
 
-            if (hasStoredNode) {
-                TransactionWalletToggle(
-                    selectedSource = selectedTransactionSource,
-                    onSelectSource = { source ->
-                        if (source == selectedTransactionSource) return@TransactionWalletToggle
-                        if (source == SpendWalletSource.LND && !hasStoredNode) return@TransactionWalletToggle
-
-                        selectedTransactionSource = source
-                        transactions = emptyList()
-                        highlightedTransactionIds = emptySet()
-                        reportableTransactionIds = emptySet()
-                        errorMessage = null
-                    }
+            selectedWalletMenuItem?.let { selectedWallet ->
+                TransactionWalletSelector(
+                    selectedWallet = selectedWallet,
+                    onClick = { showTransactionWalletPicker = true }
                 )
             }
 
@@ -293,10 +363,13 @@ fun WalletTransactionsScreen(
 
                 transactions.isEmpty() -> WalletTransactionsMessageCard(
                     title = "No transactions yet",
-                    body = if (displayedTransactionSource == SpendWalletSource.LND) {
-                        "Once your connected node sends or receives payments, that transaction history will show up here."
-                    } else {
-                        "Once this Android wallet starts sending or receiving payments, your transaction history will show up here."
+                    body = when (displayedTransactionSource) {
+                        SpendWalletSource.LND -> "Once your connected node sends or receives payments, that transaction history will show up here."
+                        SpendWalletSource.NWC -> "Once your connected NWC wallet sends or receives payments, that transaction history will show up here."
+                        SpendWalletSource.SPARK -> "Once this Android wallet starts sending or receiving payments, your transaction history will show up here."
+                        SpendWalletSource.CORE_LIGHTNING -> "Once your connected Core Lightning node sends or receives payments, that transaction history will show up here."
+                        SpendWalletSource.ECLAIR -> "Once your connected Eclair node sends or receives payments, that transaction history will show up here."
+                        SpendWalletSource.SPARK_SUBWALLET -> "Once this Spark wallet sends or receives payments, your transaction history will show up here."
                     }
                 )
 
@@ -311,11 +384,29 @@ fun WalletTransactionsScreen(
                             isReportable = transaction.id in reportableTransactionIds,
                             canManageReportableStatus = transaction.direction == "sent" &&
                                 transaction.status == "Completed",
-                            canReportMerchant = transaction.direction == "sent" &&
-                                transaction.status == "Completed" &&
-                                transaction.network.equals("lightning", ignoreCase = true) &&
-                                !transaction.destinationPubkey.isNullOrBlank(),
-                            onReportMerchant = { merchantReportTransaction = transaction },
+                            canReportMerchant = canReportMerchant(transaction),
+                            onReportMerchant = {
+                                coroutineScope.launch {
+                                    runCatching {
+                                        rootViewModel.resolveMerchantReportTransaction(
+                                            transaction = transaction,
+                                            source = displayedTransactionSource
+                                        )
+                                    }.onSuccess { resolvedTransaction ->
+                                        transactions = transactions.map { row ->
+                                            if (row.id == resolvedTransaction.id) resolvedTransaction else row
+                                        }
+                                        merchantReportTransaction = resolvedTransaction
+                                    }.onFailure { error ->
+                                        if (error is CancellationException) throw error
+                                        Toast.makeText(
+                                            context,
+                                            error.message ?: "Unable to determine destination pubkey.",
+                                            Toast.LENGTH_SHORT
+                                        ).show()
+                                    }
+                                }
+                            },
                             onManageReportability = { reportableTransaction = transaction },
                             onOpenDetails = { selectedTransaction = transaction },
                             onSaveUserLog = { userLog ->
@@ -336,6 +427,15 @@ fun WalletTransactionsScreen(
                     }
                 }
             }
+        }
+
+        if (showTransactionWalletPicker) {
+            TransactionWalletPickerSheet(
+                selectedWalletKey = selectedTransactionWalletKey,
+                walletItems = walletMenuItems,
+                onSelectWallet = ::selectTransactionWallet,
+                onDismiss = { showTransactionWalletPicker = false }
+            )
         }
     }
 }
@@ -370,77 +470,212 @@ fun WalletTransactionsMessageCard(
     }
 }
 
+private fun walletMenuItemKey(item: SpendWalletMenuItem): String {
+    return "${item.source.name}:${item.walletId ?: "root"}"
+}
+
 @Composable
-private fun TransactionWalletToggle(
-    selectedSource: SpendWalletSource,
-    onSelectSource: (SpendWalletSource) -> Unit
+private fun TransactionWalletSelector(
+    selectedWallet: SpendWalletMenuItem,
+    onClick: () -> Unit
+) {
+    Surface(
+        modifier = Modifier.fillMaxWidth(),
+        shape = RoundedCornerShape(16.dp),
+        color = Color.White.copy(alpha = 0.07f),
+        border = BorderStroke(1.dp, Color.White.copy(alpha = 0.10f)),
+        onClick = onClick
+    ) {
+        Row(
+            modifier = Modifier
+                .fillMaxWidth()
+                .padding(14.dp),
+            horizontalArrangement = Arrangement.spacedBy(12.dp),
+            verticalAlignment = Alignment.CenterVertically
+        ) {
+            Box(
+                modifier = Modifier
+                    .size(42.dp)
+                    .background(Color.White, RoundedCornerShape(14.dp)),
+                contentAlignment = Alignment.Center
+            ) {
+                TransactionWalletIcon(
+                    item = selectedWallet,
+                    modifier = Modifier.size(30.dp)
+                )
+            }
+
+            Column(
+                modifier = Modifier.weight(1f),
+                verticalArrangement = Arrangement.spacedBy(3.dp)
+            ) {
+                Text(
+                    text = selectedWallet.title,
+                    style = MaterialTheme.typography.titleMedium,
+                    fontWeight = FontWeight.Bold,
+                    color = Color.White,
+                    maxLines = 1,
+                    overflow = TextOverflow.Ellipsis
+                )
+                Text(
+                    text = selectedWallet.subtitle,
+                    style = MaterialTheme.typography.bodySmall,
+                    fontWeight = FontWeight.SemiBold,
+                    color = Color.White.copy(alpha = 0.58f),
+                    maxLines = 1,
+                    overflow = TextOverflow.Ellipsis
+                )
+            }
+
+            Icon(
+                imageVector = Icons.Rounded.KeyboardArrowDown,
+                contentDescription = null,
+                tint = Color.White.copy(alpha = 0.68f),
+                modifier = Modifier.size(20.dp)
+            )
+        }
+    }
+}
+
+@OptIn(ExperimentalMaterial3Api::class)
+@Composable
+private fun TransactionWalletPickerSheet(
+    selectedWalletKey: String?,
+    walletItems: List<SpendWalletMenuItem>,
+    onSelectWallet: (SpendWalletMenuItem) -> Unit,
+    onDismiss: () -> Unit
+) {
+    ModalBottomSheet(
+        onDismissRequest = onDismiss,
+        containerColor = Color(0xFF0B0B0F),
+        contentColor = Color.White
+    ) {
+        Column(
+            modifier = Modifier
+                .fillMaxWidth()
+                .navigationBarsPadding()
+                .padding(horizontal = 18.dp)
+                .padding(bottom = 18.dp),
+            verticalArrangement = Arrangement.spacedBy(18.dp)
+        ) {
+            Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
+                Text(
+                    text = "Transaction Wallet",
+                    style = MaterialTheme.typography.headlineSmall,
+                    fontWeight = FontWeight.Black,
+                    color = Color.White
+                )
+                Text(
+                    text = "Choose which wallet's history you want to view.",
+                    style = MaterialTheme.typography.bodyMedium,
+                    fontWeight = FontWeight.SemiBold,
+                    color = Color.White.copy(alpha = 0.62f)
+                )
+            }
+
+            Column(verticalArrangement = Arrangement.spacedBy(10.dp)) {
+                walletItems.forEach { item ->
+                    TransactionWalletPickerRow(
+                        item = item,
+                        isSelected = walletMenuItemKey(item) == selectedWalletKey,
+                        onClick = { onSelectWallet(item) }
+                    )
+                }
+            }
+        }
+    }
+}
+
+@Composable
+private fun TransactionWalletPickerRow(
+    item: SpendWalletMenuItem,
+    isSelected: Boolean,
+    onClick: () -> Unit
 ) {
     Surface(
         modifier = Modifier.fillMaxWidth(),
         shape = RoundedCornerShape(18.dp),
         color = Color.White.copy(alpha = 0.07f),
-        border = BorderStroke(1.dp, Color.White.copy(alpha = 0.08f))
+        border = BorderStroke(
+            1.dp,
+            if (isSelected) SplitBrandPink.copy(alpha = 0.80f) else Color.White.copy(alpha = 0.06f)
+        ),
+        onClick = onClick
     ) {
         Row(
-            modifier = Modifier.padding(4.dp),
-            horizontalArrangement = Arrangement.spacedBy(4.dp)
+            modifier = Modifier.padding(14.dp),
+            horizontalArrangement = Arrangement.spacedBy(14.dp),
+            verticalAlignment = Alignment.CenterVertically
         ) {
-            TransactionWalletToggleItem(
-                label = "SPARK",
-                selected = selectedSource == SpendWalletSource.SPARK,
-                onClick = { onSelectSource(SpendWalletSource.SPARK) },
-                modifier = Modifier.weight(1f)
-            )
-            TransactionWalletToggleItem(
-                label = "Node",
-                selected = selectedSource == SpendWalletSource.LND,
-                onClick = { onSelectSource(SpendWalletSource.LND) },
+            Box(
+                modifier = Modifier
+                    .size(50.dp)
+                    .background(Color.White, RoundedCornerShape(14.dp)),
+                contentAlignment = Alignment.Center
+            ) {
+                TransactionWalletIcon(
+                    item = item,
+                    modifier = Modifier.size(32.dp)
+                )
+            }
+
+            Column(
                 modifier = Modifier.weight(1f),
-                leadingIcon = {
-                    Icon(
-                        imageVector = Icons.Rounded.Bolt,
-                        contentDescription = null,
-                        tint = if (selectedSource == SpendWalletSource.LND) Color.Black else Color.White,
-                        modifier = Modifier.size(16.dp)
-                    )
-                }
+                verticalArrangement = Arrangement.spacedBy(4.dp)
+            ) {
+                Text(
+                    text = item.title,
+                    style = MaterialTheme.typography.titleMedium,
+                    fontWeight = FontWeight.Bold,
+                    color = Color.White,
+                    maxLines = 1,
+                    overflow = TextOverflow.Ellipsis
+                )
+                Text(
+                    text = item.subtitle,
+                    style = MaterialTheme.typography.bodyMedium,
+                    fontWeight = FontWeight.SemiBold,
+                    color = Color.White.copy(alpha = 0.58f),
+                    maxLines = 1,
+                    overflow = TextOverflow.Ellipsis
+                )
+            }
+
+            Icon(
+                imageVector = Icons.Rounded.Check,
+                contentDescription = if (isSelected) "Selected" else null,
+                tint = if (isSelected) SplitBrandPink else Color.White.copy(alpha = 0.24f),
+                modifier = Modifier.size(22.dp)
             )
         }
     }
 }
 
 @Composable
-private fun TransactionWalletToggleItem(
-    label: String,
-    selected: Boolean,
-    onClick: () -> Unit,
-    modifier: Modifier = Modifier,
-    leadingIcon: (@Composable () -> Unit)? = null
+private fun TransactionWalletIcon(
+    item: SpendWalletMenuItem,
+    modifier: Modifier = Modifier
 ) {
-    Surface(
-        modifier = modifier,
-        shape = RoundedCornerShape(14.dp),
-        color = if (selected) Color.White else Color.Transparent,
-        onClick = onClick
-    ) {
-        Row(
-            modifier = Modifier
-                .fillMaxWidth()
-                .padding(horizontal = 12.dp, vertical = 10.dp),
-            horizontalArrangement = Arrangement.Center,
-            verticalAlignment = Alignment.CenterVertically
-        ) {
-            if (leadingIcon != null) {
-                leadingIcon()
-                Spacer(modifier = Modifier.width(6.dp))
-            }
-            Text(
-                text = label,
-                style = MaterialTheme.typography.labelLarge,
-                fontWeight = FontWeight.Black,
-                color = if (selected) Color.Black else Color.White.copy(alpha = 0.78f),
-                maxLines = 1,
-                overflow = TextOverflow.Ellipsis
+    when (item.source) {
+        SpendWalletSource.SPARK -> {
+            Image(
+                painter = painterResource(id = R.drawable.token_logo),
+                contentDescription = null,
+                modifier = modifier
+            )
+        }
+        SpendWalletSource.NWC -> {
+            NwcSymbolIcon(modifier = modifier)
+        }
+        SpendWalletSource.LND,
+        SpendWalletSource.CORE_LIGHTNING,
+        SpendWalletSource.ECLAIR,
+        SpendWalletSource.SPARK_SUBWALLET -> {
+            Icon(
+                imageVector = Icons.Rounded.Bolt,
+                contentDescription = null,
+                tint = SplitBrandBlue,
+                modifier = modifier
             )
         }
     }
@@ -1345,6 +1580,13 @@ private fun sentLightningAddress(transaction: WalletTransactionRow): String? {
 private fun sentLightningAddressLine(transaction: WalletTransactionRow): String? {
     val lnAddress = sentLightningAddress(transaction) ?: return null
     return "to $lnAddress"
+}
+
+private fun canReportMerchant(transaction: WalletTransactionRow): Boolean {
+    if (transaction.direction != "sent" || transaction.status != "Completed") return false
+    val network = transaction.network.trim().lowercase()
+    val method = transaction.method.trim().lowercase()
+    return network == "lightning" || network == "spark" || method.contains("spark")
 }
 
 @Composable

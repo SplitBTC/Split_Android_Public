@@ -56,11 +56,25 @@ data class MessagingRecipient(
         )
 }
 
+data class MessageSigningCertificate(
+    val walletPubkey: String,
+    val lightningAddress: String,
+    val messagingPubkey: String,
+    val messagingSigningPubkey: String,
+    val messagingSigningPubkeySignature: String,
+    val messagingSigningPubkeySignatureVersion: Int,
+    val messagingSigningPubkeySignedAt: Long
+)
+
 data class SealedSenderMessagePayload(
     val body: String,
     val sender: MessagingIdentityBindingPayload,
-    val senderEnvelopeSignature: String,
-    val senderEnvelopeSignatureVersion: Int
+    val messagingSigningPubkey: String,
+    val messagingSigningPubkeySignature: String,
+    val messagingSigningPubkeySignatureVersion: Int,
+    val messagingSigningPubkeySignedAt: Long,
+    val messageSignature: String,
+    val messageSignatureVersion: Int
 )
 
 data class InboxMessage(
@@ -118,8 +132,8 @@ data class InboxMessage(
 data class OutgoingMessageStatus(
     val messageId: String,
     val clientMessageId: String,
-    val recipientLightningAddress: String,
-    val recipientWalletPubkey: String,
+    val recipientLightningAddress: String?,
+    val recipientWalletPubkey: String?,
     val status: String,
     val sameKeyRetryCount: Int,
     val createdAtMillis: Long?,

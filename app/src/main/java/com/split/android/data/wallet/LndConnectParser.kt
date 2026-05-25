@@ -61,9 +61,7 @@ object LndConnectParser {
         val host = uri.host?.trim()?.ifBlank { null }
             ?: throw LndWalletException.MissingNodeHost
 
-        if (host.lowercase().endsWith(".onion")) {
-            throw LndWalletException.TorOnionNotSupported
-        }
+        LndHostAccessPolicy.validateHost(host)
 
         val macaroonValue = queryParameterValue(uri, "macaroon")
             ?: throw LndWalletException.MissingMacaroon

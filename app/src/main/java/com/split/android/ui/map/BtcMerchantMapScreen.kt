@@ -82,7 +82,7 @@ import com.google.maps.android.compose.MapUiSettings
 import com.google.maps.android.compose.Marker
 import com.google.maps.android.compose.MarkerState
 import com.google.maps.android.compose.rememberCameraPositionState
-import com.example.splitandroid.BuildConfig
+import com.split.android.BuildConfig
 import com.split.android.data.map.BtcMerchantPlace
 import com.split.android.ui.SplitFeatureIcons
 import com.split.android.ui.SplitRootViewModel

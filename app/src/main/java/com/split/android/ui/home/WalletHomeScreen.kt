@@ -9,6 +9,7 @@ import android.widget.Toast
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.BorderStroke
+import androidx.compose.foundation.Image
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
@@ -28,6 +29,7 @@ import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.statusBarsPadding
 import androidx.compose.foundation.layout.width
+import androidx.compose.foundation.layout.widthIn
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
@@ -37,7 +39,6 @@ import androidx.compose.material.icons.automirrored.rounded.TrendingUp
 import androidx.compose.material.icons.rounded.ArrowDownward
 import androidx.compose.material.icons.rounded.ArrowUpward
 import androidx.compose.material.icons.rounded.Bolt
-import androidx.compose.material.icons.rounded.CurrencyBitcoin
 import androidx.compose.material.icons.rounded.ContentCopy
 import androidx.compose.material.icons.rounded.Info
 import androidx.compose.material.icons.rounded.Lock
@@ -45,13 +46,14 @@ import androidx.compose.material.icons.rounded.Menu
 import androidx.compose.material.icons.rounded.Person
 import androidx.compose.material.icons.rounded.QrCode2
 import androidx.compose.material.icons.rounded.Refresh
+import androidx.compose.material.icons.rounded.Shield
 import androidx.compose.material.icons.rounded.Storefront
-import androidx.compose.material.icons.rounded.Wallet
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.Button
 import androidx.compose.material3.ButtonDefaults
 import androidx.compose.material3.Icon
+import androidx.compose.material3.IconButton
 import androidx.compose.material3.DropdownMenu
 import androidx.compose.material3.DropdownMenuItem
 import androidx.compose.material3.MaterialTheme
@@ -75,6 +77,7 @@ import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.res.painterResource
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.SpanStyle
 import androidx.compose.ui.text.buildAnnotatedString
@@ -87,12 +90,18 @@ import androidx.compose.ui.unit.sp
 import androidx.compose.ui.window.Dialog
 import androidx.compose.ui.window.DialogProperties
 import coil.compose.AsyncImage
+import com.split.android.R
 import com.split.android.data.auth.AuthState
+import com.split.android.data.wallet.CoreLightningBalanceSummary
+import com.split.android.data.wallet.EclairBalanceSummary
 import com.split.android.data.wallet.LndBalanceSummary
+import com.split.android.data.wallet.NwcBalanceSummary
 import com.split.android.data.wallet.SpendWalletSource
+import com.split.android.data.wallet.SparkSubwalletBalanceSummary
 import com.split.android.data.wallet.WalletLightningAddressInfo
 import com.split.android.data.wallet.WalletState
 import com.split.android.ui.MainTabHeader
+import com.split.android.ui.NwcSymbolIcon
 import com.split.android.ui.SplitFeatureIcons
 import com.split.android.ui.SplitRootViewModel
 import com.split.android.ui.profile.CreateLightningAddressDialog
@@ -110,6 +119,16 @@ import java.util.Locale
 private val CustomerIndexBlue = Color(0xFF132B62)
 private val CustomerIndexPink = Color(0xFFBE3287)
 private val CustomerIndexBlack = Color(0xFF050508)
+private const val WalletBalancePreferencesName = "split_wallet_balance_preferences"
+private const val WalletBalanceHiddenKey = "split.walletBalanceHidden.v1"
+
+data class SpendWalletMenuItem(
+    val source: SpendWalletSource,
+    val walletId: String?,
+    val title: String,
+    val subtitle: String,
+    val isActive: Boolean
+)
 
 @Composable
 fun WalletHomeScreen(
@@ -118,10 +137,14 @@ fun WalletHomeScreen(
     authState: AuthState,
     hasValidSession: Boolean,
     activeSpendWallet: SpendWalletSource,
-    hasLndNode: Boolean,
+    walletMenuItems: List<SpendWalletMenuItem>,
     lndBalanceSummary: LndBalanceSummary?,
-    onSelectSparkWallet: () -> Unit,
-    onSelectLndWallet: () -> Unit,
+    nwcBalanceSummary: NwcBalanceSummary?,
+    coreLightningBalanceSummary: CoreLightningBalanceSummary?,
+    eclairBalanceSummary: EclairBalanceSummary?,
+    sparkSubwalletBalanceSummary: SparkSubwalletBalanceSummary?,
+    isStartingTorForActiveWallet: Boolean,
+    onSelectWalletMenuItem: (SpendWalletMenuItem) -> Unit,
     onOpenBitcoinEvents: () -> Unit,
     onOpenContacts: () -> Unit,
     onOpenProfile: () -> Unit,
@@ -149,19 +172,19 @@ fun WalletHomeScreen(
         balanceSats = walletState.balanceSats,
         btcUsdPrice = btcUsdPrice
     )
-    val displayedFiatBalanceText = if (activeSpendWallet == SpendWalletSource.LND) {
-        formatWalletFiat(
-            balanceSats = lndBalanceSummary?.spendableSats ?: 0L,
-            btcUsdPrice = btcUsdPrice
-        )
-    } else {
-        fiatBalanceText
+    val displayedBalanceSats = when (activeSpendWallet) {
+        SpendWalletSource.SPARK -> walletState.balanceSats
+        SpendWalletSource.LND -> lndBalanceSummary?.spendableSats ?: 0L
+        SpendWalletSource.NWC -> nwcBalanceSummary?.spendableSats ?: 0L
+        SpendWalletSource.CORE_LIGHTNING -> coreLightningBalanceSummary?.spendableSats ?: 0L
+        SpendWalletSource.ECLAIR -> eclairBalanceSummary?.spendableSats ?: 0L
+        SpendWalletSource.SPARK_SUBWALLET -> sparkSubwalletBalanceSummary?.spendableSats ?: 0L
     }
-    val displayedBtcBalanceText = if (activeSpendWallet == SpendWalletSource.LND) {
-        formatBtc(lndBalanceSummary?.spendableSats ?: 0L)
-    } else {
-        formatBtc(walletState.balanceSats)
-    }
+    val displayedFiatBalanceText = formatWalletFiat(
+        balanceSats = displayedBalanceSats,
+        btcUsdPrice = btcUsdPrice
+    )
+    val displayedBtcBalanceText = formatBtc(displayedBalanceSats)
     val authStatusText = walletAuthStatusText(authState)
     val authStatusIsError = authState is AuthState.Failed
 
@@ -214,9 +237,9 @@ fun WalletHomeScreen(
                 authStatusText = authStatusText,
                 authStatusIsError = authStatusIsError,
                 activeSpendWallet = activeSpendWallet,
-                hasLndNode = hasLndNode,
-                onSelectSparkWallet = onSelectSparkWallet,
-                onSelectLndWallet = onSelectLndWallet,
+                walletMenuItems = walletMenuItems,
+                isStartingTorForActiveWallet = isStartingTorForActiveWallet,
+                onSelectWalletMenuItem = onSelectWalletMenuItem,
                 onTapQrScanner = onOpenQrScanner,
                 onTapSend = onTapSend,
                 onTapReceive = onTapReceive,
@@ -272,9 +295,9 @@ private fun WalletPrimarySurface(
     authStatusText: String?,
     authStatusIsError: Boolean,
     activeSpendWallet: SpendWalletSource,
-    hasLndNode: Boolean,
-    onSelectSparkWallet: () -> Unit,
-    onSelectLndWallet: () -> Unit,
+    walletMenuItems: List<SpendWalletMenuItem>,
+    isStartingTorForActiveWallet: Boolean,
+    onSelectWalletMenuItem: (SpendWalletMenuItem) -> Unit,
     onTapQrScanner: () -> Unit,
     onTapSend: () -> Unit,
     onTapReceive: () -> Unit,
@@ -311,9 +334,9 @@ private fun WalletPrimarySurface(
                 authStatusText = authStatusText,
                 authStatusIsError = authStatusIsError,
                 activeSpendWallet = activeSpendWallet,
-                hasLndNode = hasLndNode,
-                onSelectSparkWallet = onSelectSparkWallet,
-                onSelectLndWallet = onSelectLndWallet
+                walletMenuItems = walletMenuItems,
+                isStartingTorForActiveWallet = isStartingTorForActiveWallet,
+                onSelectWalletMenuItem = onSelectWalletMenuItem
             )
 
             WalletActionRow(
@@ -334,12 +357,27 @@ private fun WalletBalanceHero(
     authStatusText: String?,
     authStatusIsError: Boolean,
     activeSpendWallet: SpendWalletSource,
-    hasLndNode: Boolean,
-    onSelectSparkWallet: () -> Unit,
-    onSelectLndWallet: () -> Unit
+    walletMenuItems: List<SpendWalletMenuItem>,
+    isStartingTorForActiveWallet: Boolean,
+    onSelectWalletMenuItem: (SpendWalletMenuItem) -> Unit
 ) {
     val shape = RoundedCornerShape(24.dp)
+    val context = LocalContext.current
+    val preferences = remember(context) {
+        context.applicationContext.getSharedPreferences(
+            WalletBalancePreferencesName,
+            Context.MODE_PRIVATE
+        )
+    }
     var isWalletMenuExpanded by remember { mutableStateOf(false) }
+    var isWalletBalanceHidden by remember {
+        mutableStateOf(preferences.getBoolean(WalletBalanceHiddenKey, false))
+    }
+    val visibleFiatBalanceText = if (isWalletBalanceHidden) "******" else fiatBalanceText
+    val visibleBtcBalanceText = if (isWalletBalanceHidden) "******" else btcBalanceText
+    val activeWalletMenuItem = walletMenuItems.firstOrNull { it.isActive }
+        ?: walletMenuItems.firstOrNull { it.source == activeSpendWallet }
+        ?: walletMenuItems.firstOrNull()
 
     Box(
         modifier = Modifier
@@ -365,74 +403,101 @@ private fun WalletBalanceHero(
                     shape = shape
                 )
         ) {
-            if (hasLndNode) {
+            val hasExternalWallet = walletMenuItems.any { it.source != SpendWalletSource.SPARK }
+            if (hasExternalWallet && activeWalletMenuItem != null) {
                 Box(
                     modifier = Modifier
                         .align(Alignment.TopEnd)
                         .padding(top = 10.dp, end = 10.dp)
                 ) {
-                    ActiveWalletBadge(
-                        activeSpendWallet = activeSpendWallet,
-                        onClick = { isWalletMenuExpanded = true }
-                    )
+                    Row(
+                        horizontalArrangement = Arrangement.spacedBy(8.dp),
+                        verticalAlignment = Alignment.CenterVertically
+                    ) {
+                        if (isStartingTorForActiveWallet) {
+                            TorStartupStatus()
+                        }
+
+                        ActiveWalletBadge(
+                            activeWalletMenuItem = activeWalletMenuItem,
+                            onClick = { isWalletMenuExpanded = true }
+                        )
+                    }
 
                     DropdownMenu(
                         expanded = isWalletMenuExpanded,
                         onDismissRequest = { isWalletMenuExpanded = false }
                     ) {
-                        DropdownMenuItem(
-                            text = { Text("Spark") },
-                            leadingIcon = {
-                                Icon(
-                                    imageVector = if (activeSpendWallet == SpendWalletSource.SPARK) {
-                                        Icons.Rounded.CurrencyBitcoin
-                                    } else {
-                                        Icons.Rounded.Wallet
-                                    },
-                                    contentDescription = null
-                                )
-                            },
-                            onClick = {
-                                isWalletMenuExpanded = false
-                                onSelectSparkWallet()
-                            }
-                        )
-                        DropdownMenuItem(
-                            text = { Text("Node") },
-                            leadingIcon = {
-                                Icon(
-                                    imageVector = Icons.Rounded.Bolt,
-                                    contentDescription = null
-                                )
-                            },
-                            onClick = {
-                                isWalletMenuExpanded = false
-                                onSelectLndWallet()
-                            }
-                        )
+                        walletMenuItems.forEach { item ->
+                            DropdownMenuItem(
+                                text = {
+                                    WalletMenuItemText(item)
+                                },
+                                leadingIcon = {
+                                    WalletMenuItemIcon(item)
+                                },
+                                onClick = {
+                                    isWalletMenuExpanded = false
+                                    onSelectWalletMenuItem(item)
+                                }
+                            )
+                        }
                     }
                 }
             }
 
             Column(
                 modifier = Modifier
-                    .padding(horizontal = 18.dp, vertical = 18.dp)
-                    .padding(end = if (hasLndNode) 68.dp else 0.dp),
+                    .padding(horizontal = 18.dp, vertical = 18.dp),
                 verticalArrangement = Arrangement.spacedBy(12.dp)
             ) {
-                Text(
-                    text = fiatBalanceText,
-                    style = MaterialTheme.typography.displaySmall.copy(
-                        fontSize = 42.sp,
-                        lineHeight = 44.sp
-                    ),
-                    fontWeight = FontWeight.Black,
-                    color = Color.White,
-                    maxLines = 1
-                )
+                if (hasExternalWallet) {
+                    Spacer(modifier = Modifier.height(20.dp))
+                }
+
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.spacedBy(10.dp),
+                    verticalAlignment = Alignment.Top
+                ) {
+                    Text(
+                        text = visibleFiatBalanceText,
+                        modifier = Modifier.weight(1f, fill = false),
+                        style = MaterialTheme.typography.displaySmall.copy(
+                            fontSize = 42.sp,
+                            lineHeight = 44.sp
+                        ),
+                        fontWeight = FontWeight.Black,
+                        color = Color.White,
+                        maxLines = 1,
+                        overflow = TextOverflow.Ellipsis
+                    )
+
+                    IconButton(
+                        onClick = {
+                            val next = !isWalletBalanceHidden
+                            isWalletBalanceHidden = next
+                            preferences.edit().putBoolean(WalletBalanceHiddenKey, next).apply()
+                        },
+                        modifier = Modifier
+                            .size(34.dp)
+                            .padding(top = 5.dp)
+                    ) {
+                        Icon(
+                            imageVector = Icons.Rounded.Shield,
+                            contentDescription = if (isWalletBalanceHidden) {
+                                "Show balance"
+                            } else {
+                                "Hide balance"
+                            },
+                            tint = Color.White.copy(alpha = if (isWalletBalanceHidden) 0.96f else 0.82f),
+                            modifier = Modifier.size(22.dp)
+                        )
+                    }
+                }
 
                 Text(
-                    text = btcBalanceText,
+                    text = visibleBtcBalanceText,
                     style = MaterialTheme.typography.titleMedium.copy(fontSize = 18.sp),
                     fontWeight = FontWeight.SemiBold,
                     color = Color.White.copy(alpha = 0.86f)
@@ -455,8 +520,34 @@ private fun WalletBalanceHero(
 }
 
 @Composable
+private fun TorStartupStatus() {
+    Surface(
+        shape = RoundedCornerShape(999.dp),
+        color = Color.White.copy(alpha = 0.14f)
+    ) {
+        Row(
+            modifier = Modifier.padding(horizontal = 8.dp, vertical = 5.dp),
+            horizontalArrangement = Arrangement.spacedBy(5.dp),
+            verticalAlignment = Alignment.CenterVertically
+        ) {
+            Text(
+                text = "Starting Tor",
+                style = MaterialTheme.typography.labelSmall,
+                fontWeight = FontWeight.Black,
+                color = Color.White
+            )
+            CircularProgressIndicator(
+                modifier = Modifier.size(12.dp),
+                color = Color.White,
+                strokeWidth = 1.5.dp
+            )
+        }
+    }
+}
+
+@Composable
 private fun ActiveWalletBadge(
-    activeSpendWallet: SpendWalletSource,
+    activeWalletMenuItem: SpendWalletMenuItem,
     onClick: () -> Unit
 ) {
     Surface(
@@ -470,27 +561,69 @@ private fun ActiveWalletBadge(
             horizontalArrangement = Arrangement.spacedBy(5.dp),
             verticalAlignment = Alignment.CenterVertically
         ) {
-            if (activeSpendWallet == SpendWalletSource.LND) {
-                Icon(
-                    imageVector = Icons.Rounded.Bolt,
-                    contentDescription = null,
-                    tint = CustomerIndexBlack,
-                    modifier = Modifier.size(11.dp)
-                )
-                Text(
-                    text = "Node",
-                    style = MaterialTheme.typography.labelSmall,
-                    fontWeight = FontWeight.Black,
-                    color = CustomerIndexBlack
-                )
-            } else {
-                Text(
-                    text = "SPARK",
-                    style = MaterialTheme.typography.labelSmall,
-                    fontWeight = FontWeight.Black,
-                    color = CustomerIndexBlack
-                )
-            }
+            WalletMenuItemIcon(
+                item = activeWalletMenuItem,
+                modifier = Modifier.size(14.dp),
+                tint = CustomerIndexBlack
+            )
+            Text(
+                text = activeWalletMenuItem.title,
+                modifier = Modifier.widthIn(max = 96.dp),
+                style = MaterialTheme.typography.labelSmall,
+                fontWeight = FontWeight.Black,
+                color = CustomerIndexBlack,
+                maxLines = 1,
+                overflow = TextOverflow.Ellipsis
+            )
+        }
+    }
+}
+
+@Composable
+private fun WalletMenuItemText(item: SpendWalletMenuItem) {
+    Column(modifier = Modifier.widthIn(min = 150.dp, max = 230.dp)) {
+        Text(
+            text = item.title,
+            maxLines = 1,
+            overflow = TextOverflow.Ellipsis
+        )
+        Text(
+            text = item.subtitle,
+            style = MaterialTheme.typography.labelSmall,
+            color = Color.Black.copy(alpha = 0.56f),
+            maxLines = 1,
+            overflow = TextOverflow.Ellipsis
+        )
+    }
+}
+
+@Composable
+private fun WalletMenuItemIcon(
+    item: SpendWalletMenuItem,
+    modifier: Modifier = Modifier.size(24.dp),
+    tint: Color = Color.Black
+) {
+    when (item.source) {
+        SpendWalletSource.SPARK -> {
+            Image(
+                painter = painterResource(id = R.drawable.token_logo),
+                contentDescription = null,
+                modifier = modifier
+            )
+        }
+        SpendWalletSource.NWC -> {
+            NwcSymbolIcon(modifier = modifier)
+        }
+        SpendWalletSource.LND,
+        SpendWalletSource.CORE_LIGHTNING,
+        SpendWalletSource.ECLAIR,
+        SpendWalletSource.SPARK_SUBWALLET -> {
+            Icon(
+                imageVector = Icons.Rounded.Bolt,
+                contentDescription = null,
+                tint = tint,
+                modifier = modifier
+            )
         }
     }
 }

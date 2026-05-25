@@ -1,5 +1,7 @@
 package com.split.android.ui.messages
 
+import com.split.android.core.AppConfig
+
 import android.content.Context
 import android.content.Intent
 import android.graphics.Bitmap
@@ -118,7 +120,6 @@ import androidx.compose.ui.platform.LocalFocusManager
 import androidx.compose.ui.platform.LocalSoftwareKeyboardController
 import androidx.compose.ui.window.Dialog
 import androidx.core.content.FileProvider
-import com.split.android.core.AppConfig
 import androidx.exifinterface.media.ExifInterface
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import com.split.android.data.messages.AttachmentMessagePayload
@@ -592,15 +593,10 @@ private fun MessagingPrivacyInfoButton(
 }
 
 private val MessagingPrivacyInfoParagraphs = listOf(
-    "Split messages are designed so Split can deliver your messages without reading their contents. When you send a message, your device encrypts the message before it is sent to Split's relay. The relay receives encrypted data and routing information, but not the readable message body.",
-    "Attachments work similarly. Photos, videos, and files are encrypted on your device before upload. Split stores and forwards encrypted attachment data, not the plaintext file.",
-    "Split uses your wallet identity to make messaging harder to impersonate. Your wallet signs a binding between your wallet public key, your Lightning Address, and your messaging public key. That lets other Split clients verify that a messaging key really belongs to the wallet and Lightning Address it claims to represent.",
-    "When you message someone by Lightning Address, Split returns their messaging identity from a server directory. Your app does not blindly trust that response. It verifies the recipient's wallet-signed identity and checks a cryptographic directory proof before using that recipient key.",
-    "Each message also includes sender authentication. After decrypting a message, your app verifies that the sender's wallet-signed identity and message envelope are valid. This helps protect against forged messages or silent identity substitution by the relay.",
-    "The benefit is that Split messaging provides authenticated end-to-end encryption: message contents and attachment bytes are encrypted for the recipient, while sender and recipient identities are tied back to wallet-controlled keys.",
-    "There are still important privacy limits. Split is not anonymous messaging. The relay still sees metadata needed to operate the service, such as which accounts are messaging, when messages are sent, which Lightning Addresses are resolved, message type, ciphertext size, and attachment size. Push notifications may also reveal to Apple or Google that Split received a notification for your device, although notification text does not include message contents.",
-    "Split messaging is also not the same as Signal's double-ratchet design. Messages use fresh encryption material when sent, but the recipient has a longer-lived messaging key. That means local device security still matters, and this should not be described as full Signal-style forward secrecy.",
-    "In short: Split is built so the server can route encrypted messages without reading them, and so your app can verify wallet-backed sender and recipient identities. It protects message contents, but it does not hide all messaging metadata."
+    "Split messages and attachments are end-to-end encrypted. Your device encrypts them before they reach Split, and only the recipient's device is able to decrypt them.",
+    "Split's server is just a relay. It helps route and deliver encrypted messages, but it cannot view message text or attachment contents.",
+    "Before sending, your app verifies the recipient's wallet-signed messaging key. That signature links their wallet, Lightning Address, and encryption key, helping ensure the message is encrypted for the correct Lightning Address.",
+    "Split uses limited delivery metadata while routing pending messages, like sender, recipient, timing, message type, and attachment size. After a message is received, Split deletes the message relay record. Encrypted attachment blobs are stored separately and are deleted after the recipient confirms attachment receipt or they expire."
 )
 
 @Composable
@@ -642,7 +638,7 @@ private fun MessagingPrivacyInfoOverlay(
                     )
 
                     Text(
-                        text = "How Split Messaging Works",
+                        text = "End-to-End Encrypted Messages",
                         modifier = Modifier.weight(1f),
                         style = MaterialTheme.typography.headlineSmall,
                         fontWeight = FontWeight.Black,

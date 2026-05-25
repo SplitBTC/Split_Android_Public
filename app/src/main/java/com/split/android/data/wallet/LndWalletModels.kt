@@ -2,6 +2,8 @@ package com.split.android.data.wallet
 
 import org.json.JSONObject
 import java.text.DateFormat
+import java.net.Inet4Address
+import java.net.Inet6Address
 import java.util.Date
 import java.util.Locale
 import kotlin.math.ceil
@@ -14,8 +16,8 @@ sealed class LndWalletException(message: String) : IllegalStateException(message
     data object InvalidMacaroon : LndWalletException("The LND macaroon is invalid.")
     data object InvalidCertificate : LndWalletException("The LND TLS certificate is invalid.")
     data object InvalidBaseUrl : LndWalletException("The LND node URL is invalid.")
-    data object TorOnionNotSupported : LndWalletException(
-        "This LND Connect QR uses a Tor .onion address. Split can connect over local network or VPN right now; Tor node connections are not supported yet."
+    data object PublicInternetHostNotAllowed : LndWalletException(
+        "This LND Connect QR uses a public host. Split supports private-network, .local, Tailscale, or Tor .onion LND connections."
     )
     data object NoStoredNode : LndWalletException("No LND node is stored on this device.")
     data object NodeNotConnected : LndWalletException("LND node is not connected.")
@@ -24,6 +26,62 @@ sealed class LndWalletException(message: String) : IllegalStateException(message
         val statusCode: Int,
         val serverMessage: String
     ) : LndWalletException("LND server error $statusCode: $serverMessage")
+}
+
+sealed interface LndResolvedAddress {
+    data class Ipv4(val address: Inet4Address) : LndResolvedAddress
+    data class Ipv6(val address: Inet6Address) : LndResolvedAddress
+}
+
+object LndHostAccessPolicy {
+    fun validateHost(host: String) {
+        val normalizedHost = host.trim().lowercase()
+        if (normalizedHost.isBlank()) {
+            throw LndWalletException.MissingNodeHost
+        }
+
+        // Onion hostnames are resolved by Tor, not device DNS.
+    }
+
+    fun validateResolvedAddresses(addresses: List<LndResolvedAddress>) {
+        if (addresses.isEmpty()) {
+            throw LndWalletException.PublicInternetHostNotAllowed
+        }
+
+        if (!addresses.all(::isAllowedResolvedAddress)) {
+            throw LndWalletException.PublicInternetHostNotAllowed
+        }
+    }
+
+    private fun isAllowedResolvedAddress(address: LndResolvedAddress): Boolean {
+        return when (address) {
+            is LndResolvedAddress.Ipv4 -> {
+                val octets = address.address.address
+                val firstOctet = octets[0].toInt() and 0xff
+                val secondOctet = octets[1].toInt() and 0xff
+
+                when (firstOctet) {
+                    10 -> true
+                    172 -> secondOctet in 16..31
+                    192 -> secondOctet == 168
+                    100 -> secondOctet in 64..127
+                    else -> false
+                }
+            }
+
+            is LndResolvedAddress.Ipv6 -> {
+                val bytes = address.address.address
+                val firstByte = bytes[0].toInt() and 0xff
+                val secondByte = bytes[1].toInt() and 0xff
+
+                if ((firstByte and 0xfe) == 0xfc) {
+                    true
+                } else {
+                    firstByte == 0xfe && (secondByte and 0xc0) == 0x80
+                }
+            }
+        }
+    }
 }
 
 data class LndNodeCredentials(

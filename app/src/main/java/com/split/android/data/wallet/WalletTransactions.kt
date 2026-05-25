@@ -40,6 +40,16 @@ data class WalletTransactionRow(
     fun withUserLog(userLog: String?): WalletTransactionRow {
         return copy(userLog = PaymentUsdSnapshot.normalizedUserLog(userLog))
     }
+
+    fun withDestinationMetadata(
+        destinationPubkey: String?,
+        paymentHash: String?
+    ): WalletTransactionRow {
+        return copy(
+            destinationPubkey = PaymentUsdSnapshot.normalizedUserLog(destinationPubkey) ?: this.destinationPubkey,
+            paymentHash = PaymentUsdSnapshot.normalizedUserLog(paymentHash) ?: this.paymentHash
+        )
+    }
 }
 
 internal fun Payment.toWalletTransactionRow(): WalletTransactionRow {

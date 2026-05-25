@@ -1,6 +1,9 @@
 package com.split.android.ui
 
 import android.Manifest
+import android.content.ClipData
+import android.content.ClipboardManager
+import android.content.Context
 import android.content.Intent
 import android.content.pm.PackageManager
 import android.net.Uri
@@ -32,6 +35,8 @@ import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.automirrored.rounded.ArrowBack
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.rounded.ChatBubble
+import androidx.compose.material.icons.rounded.CheckCircle
+import androidx.compose.material.icons.rounded.ContentCopy
 import androidx.compose.material.icons.rounded.Refresh
 import androidx.compose.material.icons.rounded.Wallet
 import androidx.compose.material3.AlertDialog
@@ -67,6 +72,7 @@ import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.vector.ImageVector
+import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
@@ -80,8 +86,12 @@ import com.split.android.data.auth.AuthState
 import com.split.android.data.messages.MessageNotificationRouter
 import com.split.android.data.messages.MessageThreadPresenceTracker
 import com.split.android.data.wallet.TransactionActivityTracker
+import com.split.android.data.wallet.RemoteNodeTorTransport
+import com.split.android.data.wallet.SpendWalletSource
+import com.split.android.data.wallet.TorBootstrapState
 import com.split.android.data.wallet.WalletState
 import com.split.android.data.wallet.WalletToastManager
+import com.split.android.data.wallet.usesTor
 import com.split.android.data.wallet.isReasonableRecoveryPhraseWord
 import com.split.android.data.wallet.normalizeRecoveryPhraseWord
 import com.split.android.data.wallet.normalizeRecoveryPhraseWords
@@ -89,6 +99,7 @@ import com.split.android.ui.coupons.NearbyCouponsScreen
 import com.split.android.ui.events.BitcoinEventsScreen
 import com.split.android.ui.home.WalletHomeScreen
 import com.split.android.ui.home.ClaimBitcoinScreen
+import com.split.android.ui.home.SpendWalletMenuItem
 import com.split.android.ui.home.WalletReceiveScreen
 import com.split.android.ui.home.WalletSendScreen
 import com.split.android.ui.home.WalletTransactionsScreen
@@ -99,6 +110,7 @@ import com.split.android.ui.profile.SupportChatRequest
 import com.split.android.ui.rewards.WalletRewardsScreen
 import com.split.android.ui.theme.SplitBrandBlue
 import com.split.android.ui.theme.SplitBrandPink
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 
 private enum class SplitDestination(
@@ -602,8 +614,33 @@ private fun WalletSeedBackupScreen(
     onConfirm: () -> Unit,
     onCancel: () -> Unit
 ) {
+    val context = LocalContext.current
+    val scope = rememberCoroutineScope()
+    val recoveryPhrase = remember(words) { words.joinToString(" ") }
     var hasAcknowledgedOneTimeDisplay by rememberSaveable { mutableStateOf(false) }
     var showDiscardConfirmation by rememberSaveable { mutableStateOf(false) }
+    var showCopyConfirmation by rememberSaveable { mutableStateOf(false) }
+    var didCopyRecoveryPhrase by rememberSaveable { mutableStateOf(false) }
+
+    fun copyRecoveryPhrase() {
+        val clipboard = context.getSystemService(Context.CLIPBOARD_SERVICE) as ClipboardManager
+        clipboard.setPrimaryClip(
+            ClipData.newPlainText("Split recovery phrase", recoveryPhrase)
+        )
+        didCopyRecoveryPhrase = true
+
+        scope.launch {
+            delay(60_000L)
+            val current = clipboard.primaryClip
+                ?.getItemAt(0)
+                ?.coerceToText(context)
+                ?.toString()
+            if (current == recoveryPhrase) {
+                clipboard.setPrimaryClip(ClipData.newPlainText("", ""))
+            }
+            didCopyRecoveryPhrase = false
+        }
+    }
 
     BackHandler {
         showDiscardConfirmation = true
@@ -633,6 +670,35 @@ private fun WalletSeedBackupScreen(
                     onClick = { showDiscardConfirmation = false }
                 ) {
                     Text("Keep Viewing")
+                }
+            }
+        )
+    }
+
+    if (showCopyConfirmation) {
+        AlertDialog(
+            onDismissRequest = { showCopyConfirmation = false },
+            title = { Text("Copy recovery phrase?") },
+            text = {
+                Text(
+                    "Only paste this into a trusted password manager. Your clipboard may be visible to other apps or synced to nearby devices. Split will try to clear it after 60 seconds."
+                )
+            },
+            confirmButton = {
+                TextButton(
+                    onClick = {
+                        showCopyConfirmation = false
+                        copyRecoveryPhrase()
+                    }
+                ) {
+                    Text("Copy")
+                }
+            },
+            dismissButton = {
+                TextButton(
+                    onClick = { showCopyConfirmation = false }
+                ) {
+                    Text("Cancel")
                 }
             }
         )
@@ -727,6 +793,34 @@ private fun WalletSeedBackupScreen(
         }
 
         Surface(
+            modifier = Modifier
+                .fillMaxWidth()
+                .clickable { showCopyConfirmation = true },
+            shape = MaterialTheme.shapes.large,
+            color = Color.White.copy(alpha = 0.08f),
+            border = BorderStroke(1.dp, Color.White.copy(alpha = 0.10f))
+        ) {
+            Row(
+                modifier = Modifier.padding(14.dp),
+                verticalAlignment = Alignment.CenterVertically,
+                horizontalArrangement = Arrangement.spacedBy(10.dp)
+            ) {
+                Icon(
+                    imageVector = if (didCopyRecoveryPhrase) Icons.Rounded.CheckCircle else Icons.Rounded.ContentCopy,
+                    contentDescription = null,
+                    tint = Color.White
+                )
+                Text(
+                    text = if (didCopyRecoveryPhrase) "Copied" else "Copy recovery phrase",
+                    modifier = Modifier.weight(1f),
+                    style = MaterialTheme.typography.bodyLarge,
+                    color = Color.White,
+                    fontWeight = FontWeight.SemiBold
+                )
+            }
+        }
+
+        Surface(
             modifier = Modifier.fillMaxWidth(),
             shape = MaterialTheme.shapes.large,
             color = Color(0xFF101013),
@@ -748,7 +842,7 @@ private fun WalletSeedBackupScreen(
                     color = Color.White.copy(alpha = 0.68f)
                 )
                 Text(
-                    text = "Do not share it with anyone. Do not store it in screenshots, email, cloud notes, or messages.",
+                    text = "Do not share it with anyone. Do not store it in screenshots, email, cloud notes, or messages. If copying, paste it only into a trusted password manager.",
                     style = MaterialTheme.typography.bodyMedium,
                     color = Color.White.copy(alpha = 0.68f)
                 )
@@ -913,6 +1007,20 @@ private fun MainWalletShell(
     val activeSpendWallet by rootViewModel.activeSpendWallet.collectAsStateWithLifecycle()
     val connectedLndNode by rootViewModel.connectedLndNode.collectAsStateWithLifecycle()
     val lndBalanceSummary by rootViewModel.lndBalanceSummary.collectAsStateWithLifecycle()
+    val connectedNwcWallet by rootViewModel.connectedNwcWallet.collectAsStateWithLifecycle()
+    val nwcBalanceSummary by rootViewModel.nwcBalanceSummary.collectAsStateWithLifecycle()
+    val connectedCoreLightningNode by rootViewModel.connectedCoreLightningNode.collectAsStateWithLifecycle()
+    val coreLightningBalanceSummary by rootViewModel.coreLightningBalanceSummary.collectAsStateWithLifecycle()
+    val connectedEclairNode by rootViewModel.connectedEclairNode.collectAsStateWithLifecycle()
+    val eclairBalanceSummary by rootViewModel.eclairBalanceSummary.collectAsStateWithLifecycle()
+    val connectedSparkSubwallet by rootViewModel.connectedSparkSubwallet.collectAsStateWithLifecycle()
+    val sparkSubwalletBalanceSummary by rootViewModel.sparkSubwalletBalanceSummary.collectAsStateWithLifecycle()
+    val storedLndNodesVersion by rootViewModel.storedLndNodesVersion.collectAsStateWithLifecycle()
+    val storedNwcWalletsVersion by rootViewModel.storedNwcWalletsVersion.collectAsStateWithLifecycle()
+    val storedCoreLightningNodesVersion by rootViewModel.storedCoreLightningNodesVersion.collectAsStateWithLifecycle()
+    val storedEclairNodesVersion by rootViewModel.storedEclairNodesVersion.collectAsStateWithLifecycle()
+    val storedSparkSubwalletsVersion by rootViewModel.storedSparkSubwalletsVersion.collectAsStateWithLifecycle()
+    val torBootstrapState by RemoteNodeTorTransport.bootstrapState.collectAsStateWithLifecycle()
     val pendingNotificationConversationId by MessageNotificationRouter.pendingConversationId.collectAsStateWithLifecycle()
     val transactionActivityTracker = remember(context) {
         TransactionActivityTracker.getInstance(context)
@@ -940,7 +1048,140 @@ private fun MainWalletShell(
     }
     val unseenTransactionCount = unseenTransactionIds.size
     var displayedUnseenTransactionCount by remember { mutableIntStateOf(unseenTransactionCount) }
-    val hasLndNode = connectedLndNode != null || rootViewModel.hasStoredLndNode()
+    val activeLndNode = connectedLndNode ?: rootViewModel.activeLndNodeCredentials()
+    val activeNwcWallet = connectedNwcWallet ?: rootViewModel.activeNwcWalletCredentials()
+    val activeCoreLightningNode = connectedCoreLightningNode ?: rootViewModel.activeCoreLightningNodeCredentials()
+    val activeEclairNode = connectedEclairNode ?: rootViewModel.activeEclairNodeCredentials()
+    val activeSparkSubwallet = connectedSparkSubwallet ?: rootViewModel.activeSparkSubwalletCredentials()
+    val storedLndNodes = remember(storedLndNodesVersion, connectedLndNode) {
+        rootViewModel.storedLndNodes()
+    }
+    val storedNwcWallets = remember(storedNwcWalletsVersion, connectedNwcWallet) {
+        rootViewModel.storedNwcWallets()
+    }
+    val storedCoreLightningNodes = remember(storedCoreLightningNodesVersion, connectedCoreLightningNode) {
+        rootViewModel.storedCoreLightningNodes()
+    }
+    val storedEclairNodes = remember(storedEclairNodesVersion, connectedEclairNode) {
+        rootViewModel.storedEclairNodes()
+    }
+    val storedSparkSubwallets = remember(storedSparkSubwalletsVersion, connectedSparkSubwallet) {
+        rootViewModel.storedSparkSubwallets()
+    }
+    val walletMenuItems = remember(
+        activeSpendWallet,
+        activeLndNode,
+        activeNwcWallet,
+        activeCoreLightningNode,
+        activeEclairNode,
+        activeSparkSubwallet,
+        storedLndNodes,
+        storedNwcWallets,
+        storedCoreLightningNodes,
+        storedEclairNodes,
+        storedSparkSubwallets
+    ) {
+        val activeLndNodeId = activeLndNode?.id
+        val activeNwcWalletId = activeNwcWallet?.id
+        val activeCoreLightningNodeId = activeCoreLightningNode?.id
+        val activeEclairNodeId = activeEclairNode?.id
+        val activeSparkSubwalletId = activeSparkSubwallet?.id
+
+        buildList {
+            add(
+                SpendWalletMenuItem(
+                    source = SpendWalletSource.SPARK,
+                    walletId = null,
+                    title = "Split",
+                    subtitle = "Root Spark wallet",
+                    isActive = activeSpendWallet == SpendWalletSource.SPARK
+                )
+            )
+
+            (listOfNotNull(activeLndNode) + storedLndNodes)
+                .distinctBy { it.id }
+                .forEach { node ->
+                    add(
+                        SpendWalletMenuItem(
+                            source = SpendWalletSource.LND,
+                            walletId = node.id,
+                            title = node.displayName,
+                            subtitle = "LND Lightning Node",
+                            isActive = activeSpendWallet == SpendWalletSource.LND &&
+                                node.id == activeLndNodeId
+                        )
+                    )
+                }
+
+            (listOfNotNull(activeNwcWallet) + storedNwcWallets)
+                .distinctBy { it.id }
+                .forEach { wallet ->
+                    add(
+                        SpendWalletMenuItem(
+                            source = SpendWalletSource.NWC,
+                            walletId = wallet.id,
+                            title = wallet.displayName,
+                            subtitle = "NWC Wallet or Node",
+                            isActive = activeSpendWallet == SpendWalletSource.NWC &&
+                                wallet.id == activeNwcWalletId
+                        )
+                    )
+                }
+
+            (listOfNotNull(activeCoreLightningNode) + storedCoreLightningNodes)
+                .distinctBy { it.id }
+                .forEach { node ->
+                    add(
+                        SpendWalletMenuItem(
+                            source = SpendWalletSource.CORE_LIGHTNING,
+                            walletId = node.id,
+                            title = node.displayName,
+                            subtitle = "Core Lightning Node",
+                            isActive = activeSpendWallet == SpendWalletSource.CORE_LIGHTNING &&
+                                node.id == activeCoreLightningNodeId
+                        )
+                    )
+                }
+
+            (listOfNotNull(activeEclairNode) + storedEclairNodes)
+                .distinctBy { it.id }
+                .forEach { node ->
+                    add(
+                        SpendWalletMenuItem(
+                            source = SpendWalletSource.ECLAIR,
+                            walletId = node.id,
+                            title = node.displayName,
+                            subtitle = "Eclair Node",
+                            isActive = activeSpendWallet == SpendWalletSource.ECLAIR &&
+                                node.id == activeEclairNodeId
+                        )
+                    )
+                }
+
+            (listOfNotNull(activeSparkSubwallet) + storedSparkSubwallets)
+                .distinctBy { it.id }
+                .forEach { wallet ->
+                    add(
+                        SpendWalletMenuItem(
+                            source = SpendWalletSource.SPARK_SUBWALLET,
+                            walletId = wallet.id,
+                            title = wallet.displayName,
+                            subtitle = "Spark Wallet",
+                            isActive = activeSpendWallet == SpendWalletSource.SPARK_SUBWALLET &&
+                                wallet.id == activeSparkSubwalletId
+                        )
+                    )
+                }
+        }
+    }
+    val activeSpendWalletUsesTor = when (activeSpendWallet) {
+        SpendWalletSource.LND -> activeLndNode?.usesTor == true
+        SpendWalletSource.NWC -> activeNwcWallet?.usesTor == true
+        SpendWalletSource.CORE_LIGHTNING -> activeCoreLightningNode?.usesTor == true
+        SpendWalletSource.ECLAIR -> activeEclairNode?.usesTor == true
+        SpendWalletSource.SPARK,
+        SpendWalletSource.SPARK_SUBWALLET -> false
+    }
 
     val notificationPermissionLauncher = rememberLauncherForActivityResult(
         contract = ActivityResultContracts.RequestPermission()
@@ -966,6 +1207,20 @@ private fun MainWalletShell(
     LaunchedEffect(isAppActive) {
         MessageThreadPresenceTracker.setAppForeground(isAppActive)
         rootViewModel.setLndInvoiceListenerActive(isAppActive)
+        rootViewModel.setNwcNotificationListenerActive(isAppActive)
+    }
+
+    LaunchedEffect(
+        isAppActive,
+        activeSpendWallet,
+        storedLndNodesVersion,
+        storedNwcWalletsVersion,
+        storedCoreLightningNodesVersion,
+        storedEclairNodesVersion
+    ) {
+        if (isAppActive) {
+            rootViewModel.warmTorForActiveWalletIfNeeded()
+        }
     }
 
     LaunchedEffect(isAppActive, hasValidSession, walletState.sparkAddress) {
@@ -1033,7 +1288,11 @@ private fun MainWalletShell(
         sendOverlayConfig = config
     }
 
-    val openMainTabQrScanner = {
+    val openMainTabQrScanner = openMainTabQrScanner@{
+        if (activeSpendWalletUsesTor && torBootstrapState !is TorBootstrapState.Ready) {
+            RemoteNodeTorTransport.warmUp(context.applicationContext, scope)
+            return@openMainTabQrScanner
+        }
         openSendOverlay(SendOverlayConfig(startInScanMode = true))
     }
 
@@ -1113,10 +1372,24 @@ private fun MainWalletShell(
                     authState = authState,
                     hasValidSession = hasValidSession,
                     activeSpendWallet = activeSpendWallet,
-                    hasLndNode = hasLndNode,
+                    walletMenuItems = walletMenuItems,
                     lndBalanceSummary = lndBalanceSummary,
-                    onSelectSparkWallet = { rootViewModel.setSparkSpendWallet() },
-                    onSelectLndWallet = { rootViewModel.setLndSpendWalletIfAvailable() },
+                    nwcBalanceSummary = nwcBalanceSummary,
+                    coreLightningBalanceSummary = coreLightningBalanceSummary,
+                    eclairBalanceSummary = eclairBalanceSummary,
+                    sparkSubwalletBalanceSummary = sparkSubwalletBalanceSummary,
+                    isStartingTorForActiveWallet = activeSpendWalletUsesTor &&
+                        torBootstrapState is TorBootstrapState.Starting,
+                    onSelectWalletMenuItem = { item ->
+                        when (item.source) {
+                            SpendWalletSource.SPARK -> rootViewModel.setSparkSpendWallet()
+                            SpendWalletSource.LND -> item.walletId?.let(rootViewModel::setLndSpendWallet)
+                            SpendWalletSource.NWC -> item.walletId?.let(rootViewModel::setNwcSpendWallet)
+                            SpendWalletSource.CORE_LIGHTNING -> item.walletId?.let(rootViewModel::setCoreLightningSpendWallet)
+                            SpendWalletSource.ECLAIR -> item.walletId?.let(rootViewModel::setEclairSpendWallet)
+                            SpendWalletSource.SPARK_SUBWALLET -> item.walletId?.let(rootViewModel::setSparkSubwalletSpendWallet)
+                        }
+                    },
                     onOpenBitcoinEvents = openMainTabBitcoinEvents,
                     onOpenContacts = openMainTabContacts,
                     onOpenProfile = openMainTabProfile,
@@ -1210,6 +1483,17 @@ private fun MainWalletShell(
 
             WalletOverlay.TRANSACTIONS -> WalletTransactionsScreen(
                 rootViewModel = rootViewModel,
+                walletMenuItems = walletMenuItems,
+                onSelectWalletMenuItem = { item ->
+                    when (item.source) {
+                        SpendWalletSource.SPARK -> rootViewModel.setSparkSpendWallet()
+                        SpendWalletSource.LND -> item.walletId?.let(rootViewModel::setLndSpendWallet)
+                        SpendWalletSource.NWC -> item.walletId?.let(rootViewModel::setNwcSpendWallet)
+                        SpendWalletSource.CORE_LIGHTNING -> item.walletId?.let(rootViewModel::setCoreLightningSpendWallet)
+                        SpendWalletSource.ECLAIR -> item.walletId?.let(rootViewModel::setEclairSpendWallet)
+                        SpendWalletSource.SPARK_SUBWALLET -> item.walletId?.let(rootViewModel::setSparkSubwalletSpendWallet)
+                    }
+                },
                 onDismiss = { activeOverlay = null }
             )
 

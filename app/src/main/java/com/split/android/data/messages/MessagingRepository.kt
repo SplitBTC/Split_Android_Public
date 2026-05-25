@@ -28,6 +28,21 @@ class MessagingRepository(
         val sameKeyRetryCount: Int? = null
     )
 
+    private data class InboxRecoveryCandidate(
+        val message: InboxMessage,
+        val reason: InboxRecoveryFailureReason
+    )
+
+    private enum class InboxRecoveryFailureReason(
+        val rawValue: String,
+        val shouldRotateMessagingIdentity: Boolean
+    ) {
+        INVALID_STORED_KEY("invalidStoredKey", true),
+        CIPHERTEXT_DECRYPT_FAILED("ciphertextDecryptFailed", true),
+        SEALED_PAYLOAD_DECODE_FAILED("sealedPayloadDecodeFailed", false),
+        SEALED_ENVELOPE_VERIFICATION_FAILED("sealedEnvelopeVerificationFailed", false)
+    }
+
     private val syncMutex = Mutex()
     private val outgoingStatusSyncMutex = Mutex()
     private var lastSuccessfulSyncAtMillis: Long? = null
@@ -69,12 +84,15 @@ class MessagingRepository(
                 val inboxMessages = fetchInboxMessages(authManager, walletManager)
                 if (inboxMessages.isNotEmpty()) {
                     val decryptedMessages = mutableListOf<StoredMessage>()
-                    val recoveryCandidateMessages = mutableListOf<InboxMessage>()
+                    val recoveryCandidates = mutableListOf<InboxRecoveryCandidate>()
                     inboxMessages.forEach { inboxMessage ->
                         try {
                             decryptInboxMessage(inboxMessage)?.let(decryptedMessages::add)
-                        } catch (_: RecoverableInboxMessageException) {
-                            recoveryCandidateMessages += inboxMessage
+                        } catch (error: RecoverableInboxMessageException) {
+                            recoveryCandidates += InboxRecoveryCandidate(
+                                message = inboxMessage,
+                                reason = error.reason
+                            )
                         }
                     }
 
@@ -84,7 +102,7 @@ class MessagingRepository(
                         emptyList()
                     }
 
-                    if (recoveryCandidateMessages.isNotEmpty()) {
+                    if (recoveryCandidates.isNotEmpty()) {
                         val currentMessagingPubkeyHex = runCatching {
                             messageKeyManager.ensureRegistered(authManager, walletManager)
                             deviceTokenManager?.syncCurrentDeviceToken(
@@ -100,22 +118,21 @@ class MessagingRepository(
                             null
                         }
 
-                        val rekeyRequiredMessageIds = recoveryCandidateMessages
-                            .filter { inboxMessage ->
+                        val rekeyRequiredMessageIds = recoveryCandidates
+                            .filter { candidate ->
                                 shouldRequestRekey(
-                                    inboxMessage = inboxMessage,
+                                    inboxMessage = candidate.message,
                                     currentMessagingPubkeyHex = currentMessagingPubkeyHex
                                 )
                             }
-                            .map { it.messageId }
-                        val decryptFailedMessageIds = recoveryCandidateMessages
-                            .filter { inboxMessage ->
+                            .map { it.message.messageId }
+                        val decryptFailedCandidates = recoveryCandidates
+                            .filter { candidate ->
                                 shouldMarkDecryptFailed(
-                                    inboxMessage = inboxMessage,
+                                    inboxMessage = candidate.message,
                                     currentMessagingPubkeyHex = currentMessagingPubkeyHex
                                 )
                             }
-                            .map { it.messageId }
 
                         if (rekeyRequiredMessageIds.isNotEmpty()) {
                             markMessagesRekeyRequired(
@@ -125,12 +142,37 @@ class MessagingRepository(
                             )
                         }
 
-                        if (decryptFailedMessageIds.isNotEmpty()) {
+                        if (decryptFailedCandidates.isNotEmpty()) {
                             markMessagesDecryptFailed(
-                                messageIds = decryptFailedMessageIds,
+                                failureReasons = decryptFailedCandidates.associate {
+                                    it.message.messageId to it.reason.rawValue
+                                },
                                 authManager = authManager,
                                 walletManager = walletManager
                             )
+                            if (decryptFailedCandidates.any { it.reason.shouldRotateMessagingIdentity }) {
+                                val reason = decryptFailedCandidates
+                                    .map { it.reason.rawValue }
+                                    .distinct()
+                                    .sorted()
+                                    .joinToString(",")
+                                runCatching {
+                                    messageKeyManager.rotateMessagingIdentityAfterSameKeyFailure(
+                                        authManager = authManager,
+                                        walletManager = walletManager,
+                                        reason = "same-key $reason"
+                                    )
+                                    deviceTokenManager?.syncCurrentDeviceToken(
+                                        authManager = authManager,
+                                        walletManager = walletManager,
+                                        force = true
+                                    )
+                                }.onFailure { error ->
+                                    println(
+                                        "Failed to rotate messaging identity after decrypt failure: ${error.localizedMessage}"
+                                    )
+                                }
+                            }
                         }
                     }
 
@@ -615,6 +657,7 @@ class MessagingRepository(
                 createdAtClientMs = createdAtMillis,
                 envelopeVersion = 3,
                 clientMessageId = clientMessageId,
+                messageKeyManager = messageKeyManager,
                 walletManager = walletManager
             ),
             recipientMessagingPubkeyHex = currentRecipient.messagingPubkey
@@ -650,6 +693,7 @@ class MessagingRepository(
                     createdAtClientMs = createdAtMillis,
                     envelopeVersion = 3,
                     clientMessageId = clientMessageId,
+                    messageKeyManager = messageKeyManager,
                     walletManager = walletManager
                 ),
                 recipientMessagingPubkeyHex = currentRecipient.messagingPubkey
@@ -823,8 +867,8 @@ class MessagingRepository(
                     OutgoingMessageStatus(
                         messageId = json.getString("messageId"),
                         clientMessageId = json.getString("clientMessageId"),
-                        recipientLightningAddress = json.getString("recipientLightningAddress"),
-                        recipientWalletPubkey = json.getString("recipientWalletPubkey"),
+                        recipientLightningAddress = json.optString("recipientLightningAddress").ifBlank { null },
+                        recipientWalletPubkey = json.optString("recipientWalletPubkey").ifBlank { null },
                         status = json.optString("status", "pending"),
                         sameKeyRetryCount = json.optInt("sameKeyRetryCount", 0),
                         createdAtMillis = isoStringToMillis(json.optString("createdAt").ifBlank { null }),
@@ -906,14 +950,19 @@ class MessagingRepository(
         val sealedPayload = try {
             plaintext.toSealedSenderMessagePayload()
         } catch (error: Exception) {
-            throw RecoverableInboxMessageException("Inbox message payload decode failed.", error)
+            throw RecoverableInboxMessageException(
+                reason = InboxRecoveryFailureReason.SEALED_PAYLOAD_DECODE_FAILED,
+                message = "Inbox message payload decode failed.",
+                cause = error
+            )
         }
         try {
             MessageBindingVerifier.verifySealedIncomingEnvelope(inboxMessage, sealedPayload)
         } catch (error: Exception) {
             throw RecoverableInboxMessageException(
-                "Inbox sealed message verification failed.",
-                error
+                reason = InboxRecoveryFailureReason.SEALED_ENVELOPE_VERIFICATION_FAILED,
+                message = "Inbox sealed message verification failed.",
+                cause = error
             )
         }
         return StoredMessage(
@@ -941,8 +990,9 @@ class MessagingRepository(
             MessageBindingVerifier.verifyIncomingEnvelope(inboxMessage)
         } catch (error: Exception) {
             throw RecoverableInboxMessageException(
-                "Inbox legacy message verification failed.",
-                error
+                reason = InboxRecoveryFailureReason.SEALED_ENVELOPE_VERIFICATION_FAILED,
+                message = "Inbox legacy message verification failed.",
+                cause = error
             )
         }
         val plaintext = decryptInboxCiphertext(inboxMessage)
@@ -968,11 +1018,20 @@ class MessagingRepository(
 
     private fun decryptInboxCiphertext(inboxMessage: InboxMessage): String {
         val ciphertext = inboxMessage.ciphertext
-            ?: throw RecoverableInboxMessageException("Inbox message ciphertext is missing.")
+            ?: throw RecoverableInboxMessageException(
+                reason = InboxRecoveryFailureReason.CIPHERTEXT_DECRYPT_FAILED,
+                message = "Inbox message ciphertext is missing."
+            )
         val nonce = inboxMessage.nonce
-            ?: throw RecoverableInboxMessageException("Inbox message nonce is missing.")
+            ?: throw RecoverableInboxMessageException(
+                reason = InboxRecoveryFailureReason.CIPHERTEXT_DECRYPT_FAILED,
+                message = "Inbox message nonce is missing."
+            )
         val senderEphemeralPubkey = inboxMessage.senderEphemeralPubkey
-            ?: throw RecoverableInboxMessageException("Inbox sender ephemeral pubkey is missing.")
+            ?: throw RecoverableInboxMessageException(
+                reason = InboxRecoveryFailureReason.CIPHERTEXT_DECRYPT_FAILED,
+                message = "Inbox sender ephemeral pubkey is missing."
+            )
         return try {
             messageCrypto.decrypt(
                 ciphertextBase64 = ciphertext,
@@ -981,7 +1040,16 @@ class MessagingRepository(
                 recipientPrivateKeyHex = messageKeyManager.currentMessagingPrivateKeyHex()
             )
         } catch (error: Exception) {
-            throw RecoverableInboxMessageException("Inbox message decrypt failed.", error)
+            val reason = if (error.message.orEmpty().lowercase().contains("stored messaging key is invalid")) {
+                InboxRecoveryFailureReason.INVALID_STORED_KEY
+            } else {
+                InboxRecoveryFailureReason.CIPHERTEXT_DECRYPT_FAILED
+            }
+            throw RecoverableInboxMessageException(
+                reason = reason,
+                message = "Inbox message decrypt failed.",
+                cause = error
+            )
         }
     }
 
@@ -1273,16 +1341,24 @@ class MessagingRepository(
     }
 
     private suspend fun markMessagesDecryptFailed(
-        messageIds: List<String>,
+        failureReasons: Map<String, String>,
         authManager: AuthManager,
         walletManager: WalletManager
     ) {
+        val messageIds = failureReasons.keys.toList()
         if (messageIds.isEmpty()) return
 
         val messageIdArray = JSONArray().apply {
             messageIds.forEach { put(it) }
         }
-        val requestBody = JSONObject().put("messageIds", messageIdArray)
+        val reasonJson = JSONObject().apply {
+            failureReasons.forEach { (messageId, reason) ->
+                put(messageId, reason)
+            }
+        }
+        val requestBody = JSONObject()
+            .put("messageIds", messageIdArray)
+            .put("failureReasons", reasonJson)
         var response = httpClient.postJson("/messaging/v3/decrypt-failed", requestBody.toString())
         if (response.statusCode == 401 || response.statusCode == 403) {
             authManager.invalidateSession()
@@ -1319,6 +1395,7 @@ class MessagingRepository(
     private class RecipientBindingStaleException : Exception()
 
     private class RecoverableInboxMessageException(
+        val reason: InboxRecoveryFailureReason,
         message: String,
         cause: Throwable? = null
     ) : Exception(message, cause)
@@ -1332,11 +1409,12 @@ private suspend fun buildSealedSenderPayloadString(
     createdAtClientMs: Long,
     envelopeVersion: Int,
     clientMessageId: String,
+    messageKeyManager: MessageKeyManager,
     walletManager: WalletManager
 ): String {
-    val senderEnvelopeSignatureVersion = 2
+    val messageSignatureVersion = 2
     val canonicalEnvelopeMessage = MessageBindingVerifier.buildMessagingEnvelopeSignatureMessage(
-        version = senderEnvelopeSignatureVersion,
+        version = messageSignatureVersion,
         clientMessageId = clientMessageId,
         senderBinding = senderBinding,
         recipientWalletPubkey = recipient.walletPubkey,
@@ -1347,16 +1425,21 @@ private suspend fun buildSealedSenderPayloadString(
         createdAtClientMs = createdAtClientMs,
         envelopeVersion = envelopeVersion
     )
-    val signedEnvelope = walletManager.signAuthMessage(canonicalEnvelopeMessage)
-    require(signedEnvelope.pubkey.trim().lowercase() == senderBinding.walletPubkey.lowercase()) {
-        "Invalid messaging envelope signature response."
-    }
+    val signingCertificate = messageKeyManager.currentMessageSigningCertificate(
+        senderBinding = senderBinding,
+        walletManager = walletManager
+    )
+    val messageSignature = messageKeyManager.signMessageEnvelope(canonicalEnvelopeMessage)
 
     return JSONObject()
         .put("body", plaintext)
         .put("sender", senderBinding.toJson())
-        .put("senderEnvelopeSignature", signedEnvelope.signature)
-        .put("senderEnvelopeSignatureVersion", senderEnvelopeSignatureVersion)
+        .put("messagingSigningPubkey", signingCertificate.messagingSigningPubkey)
+        .put("messagingSigningPubkeySignature", signingCertificate.messagingSigningPubkeySignature)
+        .put("messagingSigningPubkeySignatureVersion", signingCertificate.messagingSigningPubkeySignatureVersion)
+        .put("messagingSigningPubkeySignedAt", signingCertificate.messagingSigningPubkeySignedAt)
+        .put("messageSignature", messageSignature)
+        .put("messageSignatureVersion", messageSignatureVersion)
         .toString()
 }
 
@@ -1394,8 +1477,12 @@ private fun String.toSealedSenderMessagePayload(): SealedSenderMessagePayload {
             messagingIdentitySignatureVersion = senderJson.getInt("messagingIdentitySignatureVersion"),
             messagingIdentitySignedAtSeconds = senderJson.getLong("messagingIdentitySignedAt")
         ),
-        senderEnvelopeSignature = json.getString("senderEnvelopeSignature"),
-        senderEnvelopeSignatureVersion = json.getInt("senderEnvelopeSignatureVersion")
+        messagingSigningPubkey = json.getString("messagingSigningPubkey"),
+        messagingSigningPubkeySignature = json.getString("messagingSigningPubkeySignature"),
+        messagingSigningPubkeySignatureVersion = json.getInt("messagingSigningPubkeySignatureVersion"),
+        messagingSigningPubkeySignedAt = json.getLong("messagingSigningPubkeySignedAt"),
+        messageSignature = json.getString("messageSignature"),
+        messageSignatureVersion = json.getInt("messageSignatureVersion")
     )
 }
 

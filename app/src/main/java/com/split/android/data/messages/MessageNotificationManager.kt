@@ -15,8 +15,8 @@ import android.os.VibratorManager
 import androidx.core.app.NotificationCompat
 import androidx.core.app.NotificationManagerCompat
 import androidx.core.app.TaskStackBuilder
-import com.example.splitandroid.R
 import com.split.android.MainActivity
+import com.split.android.R
 
 object MessageNotificationManager {
     const val EXTRA_CONVERSATION_ID = "split_message_conversation_id"
