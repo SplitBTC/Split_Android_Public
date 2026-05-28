@@ -332,7 +332,8 @@ data class CoreLightningPayResponse(
     companion object {
         fun fromJson(json: JSONObject): CoreLightningPayResponse {
             return CoreLightningPayResponse(
-                paymentPreimage = json.coreLightningOptNullableString("payment_preimage"),
+                paymentPreimage = json.coreLightningOptNullableString("payment_preimage")
+                    ?: json.coreLightningOptNullableString("preimage"),
                 paymentHash = json.coreLightningOptNullableString("payment_hash"),
                 createdAt = CoreLightningFlexibleLong.parse(json.opt("created_at")),
                 parts = json.coreLightningOptNullableInt("parts"),
@@ -392,7 +393,8 @@ data class CoreLightningPay(
         fun fromJson(json: JSONObject): CoreLightningPay {
             return CoreLightningPay(
                 paymentHash = json.coreLightningOptNullableString("payment_hash"),
-                paymentPreimage = json.coreLightningOptNullableString("payment_preimage"),
+                paymentPreimage = json.coreLightningOptNullableString("payment_preimage")
+                    ?: json.coreLightningOptNullableString("preimage"),
                 bolt11 = json.coreLightningOptNullableString("bolt11"),
                 description = json.coreLightningOptNullableString("description"),
                 destination = json.coreLightningOptNullableString("destination"),
@@ -441,6 +443,7 @@ data class CoreLightningInvoice(
                 paidAt = CoreLightningFlexibleLong.parse(json.opt("paid_at")),
                 bolt11 = json.coreLightningOptNullableString("bolt11"),
                 paymentPreimage = json.coreLightningOptNullableString("payment_preimage")
+                    ?: json.coreLightningOptNullableString("preimage")
             )
         }
     }

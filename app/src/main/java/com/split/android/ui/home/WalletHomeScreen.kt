@@ -36,6 +36,8 @@ import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.rounded.TrendingUp
+import androidx.compose.material.icons.rounded.Add
+import androidx.compose.material.icons.rounded.AddCircle
 import androidx.compose.material.icons.rounded.ArrowDownward
 import androidx.compose.material.icons.rounded.ArrowUpward
 import androidx.compose.material.icons.rounded.Bolt
@@ -145,6 +147,7 @@ fun WalletHomeScreen(
     sparkSubwalletBalanceSummary: SparkSubwalletBalanceSummary?,
     isStartingTorForActiveWallet: Boolean,
     onSelectWalletMenuItem: (SpendWalletMenuItem) -> Unit,
+    onAddWallet: () -> Unit,
     onOpenBitcoinEvents: () -> Unit,
     onOpenContacts: () -> Unit,
     onOpenProfile: () -> Unit,
@@ -240,6 +243,7 @@ fun WalletHomeScreen(
                 walletMenuItems = walletMenuItems,
                 isStartingTorForActiveWallet = isStartingTorForActiveWallet,
                 onSelectWalletMenuItem = onSelectWalletMenuItem,
+                onAddWallet = onAddWallet,
                 onTapQrScanner = onOpenQrScanner,
                 onTapSend = onTapSend,
                 onTapReceive = onTapReceive,
@@ -298,6 +302,7 @@ private fun WalletPrimarySurface(
     walletMenuItems: List<SpendWalletMenuItem>,
     isStartingTorForActiveWallet: Boolean,
     onSelectWalletMenuItem: (SpendWalletMenuItem) -> Unit,
+    onAddWallet: () -> Unit,
     onTapQrScanner: () -> Unit,
     onTapSend: () -> Unit,
     onTapReceive: () -> Unit,
@@ -336,7 +341,8 @@ private fun WalletPrimarySurface(
                 activeSpendWallet = activeSpendWallet,
                 walletMenuItems = walletMenuItems,
                 isStartingTorForActiveWallet = isStartingTorForActiveWallet,
-                onSelectWalletMenuItem = onSelectWalletMenuItem
+                onSelectWalletMenuItem = onSelectWalletMenuItem,
+                onAddWallet = onAddWallet
             )
 
             WalletActionRow(
@@ -359,7 +365,8 @@ private fun WalletBalanceHero(
     activeSpendWallet: SpendWalletSource,
     walletMenuItems: List<SpendWalletMenuItem>,
     isStartingTorForActiveWallet: Boolean,
-    onSelectWalletMenuItem: (SpendWalletMenuItem) -> Unit
+    onSelectWalletMenuItem: (SpendWalletMenuItem) -> Unit,
+    onAddWallet: () -> Unit
 ) {
     val shape = RoundedCornerShape(24.dp)
     val context = LocalContext.current
@@ -378,6 +385,8 @@ private fun WalletBalanceHero(
     val activeWalletMenuItem = walletMenuItems.firstOrNull { it.isActive }
         ?: walletMenuItems.firstOrNull { it.source == activeSpendWallet }
         ?: walletMenuItems.firstOrNull()
+    val hasExternalWallet = walletMenuItems.any { it.source != SpendWalletSource.SPARK }
+    val showRootOnlyAddWalletButton = !hasExternalWallet
 
     Box(
         modifier = Modifier
@@ -403,7 +412,6 @@ private fun WalletBalanceHero(
                     shape = shape
                 )
         ) {
-            val hasExternalWallet = walletMenuItems.any { it.source != SpendWalletSource.SPARK }
             if (hasExternalWallet && activeWalletMenuItem != null) {
                 Box(
                     modifier = Modifier
@@ -442,7 +450,38 @@ private fun WalletBalanceHero(
                                 }
                             )
                         }
+
+                        DropdownMenuItem(
+                            text = {
+                                Text("Add Wallet")
+                            },
+                            leadingIcon = {
+                                Icon(
+                                    imageVector = Icons.Rounded.AddCircle,
+                                    contentDescription = null
+                                )
+                            },
+                            onClick = {
+                                isWalletMenuExpanded = false
+                                onAddWallet()
+                            }
+                        )
                     }
+                }
+            } else if (showRootOnlyAddWalletButton) {
+                IconButton(
+                    onClick = onAddWallet,
+                    modifier = Modifier
+                        .align(Alignment.TopEnd)
+                        .padding(top = 10.dp, end = 10.dp)
+                        .size(30.dp)
+                ) {
+                    Icon(
+                        imageVector = Icons.Rounded.Add,
+                        contentDescription = "Add wallet",
+                        tint = Color.White,
+                        modifier = Modifier.size(18.dp)
+                    )
                 }
             }
 
@@ -451,7 +490,7 @@ private fun WalletBalanceHero(
                     .padding(horizontal = 18.dp, vertical = 18.dp),
                 verticalArrangement = Arrangement.spacedBy(12.dp)
             ) {
-                if (hasExternalWallet) {
+                if (hasExternalWallet || showRootOnlyAddWalletButton) {
                     Spacer(modifier = Modifier.height(20.dp))
                 }
 

@@ -163,6 +163,11 @@ private enum class ProfileRoute {
     WALLET_MANAGEMENT
 }
 
+enum class ProfileStartRoute {
+    HOME,
+    ADD_LIGHTNING_WALLET
+}
+
 private enum class SparkSubwalletSetupMode {
     OVERVIEW,
     CREATE,
@@ -194,10 +199,11 @@ fun ProfileScreen(
     rootViewModel: SplitRootViewModel,
     walletState: WalletState.Ready,
     modifier: Modifier = Modifier,
+    initialRoute: ProfileStartRoute = ProfileStartRoute.HOME,
     onClose: (() -> Unit)? = null,
     onOpenSupportChat: (SupportChatRequest) -> Unit
 ) {
-    var route by remember { mutableStateOf(ProfileRoute.HOME) }
+    var route by remember(initialRoute) { mutableStateOf(initialRoute.toProfileRoute()) }
     var selectedLightningWallet by remember { mutableStateOf<ExternalWalletRecord?>(null) }
     val storedMessages by rootViewModel.storedMessages.collectAsStateWithLifecycle()
 
@@ -305,6 +311,13 @@ fun ProfileScreen(
             rootViewModel = rootViewModel,
             onBack = { route = ProfileRoute.HOME }
         )
+    }
+}
+
+private fun ProfileStartRoute.toProfileRoute(): ProfileRoute {
+    return when (this) {
+        ProfileStartRoute.HOME -> ProfileRoute.HOME
+        ProfileStartRoute.ADD_LIGHTNING_WALLET -> ProfileRoute.ADD_LIGHTNING_WALLET
     }
 }
 

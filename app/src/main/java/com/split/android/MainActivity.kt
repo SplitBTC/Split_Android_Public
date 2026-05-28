@@ -1,6 +1,5 @@
 package com.split.android
 
-
 import android.content.Intent
 import android.net.Uri
 import android.os.Bundle
@@ -219,7 +218,7 @@ private fun ForcedUpdateScreen() {
                 )
 
                 Text(
-                    text = "Please update to the latest version of Split for continued usage. If you are having any issues please do not hesitate to reach out to support@example.com",
+                    text = "Please update to the latest version of Split for continued usage. If you are having any issues please reach out to support@example.com",
                     style = MaterialTheme.typography.bodyLarge,
                     color = Color.White.copy(alpha = 0.78f),
                     textAlign = TextAlign.Center

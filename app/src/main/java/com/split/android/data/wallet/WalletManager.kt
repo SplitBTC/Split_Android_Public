@@ -4,13 +4,12 @@ import android.content.Context
 import android.os.Build
 import android.util.Log
 import breez_sdk_spark.Payment
-import breez_sdk_spark.PaymentDetails
-import breez_sdk_spark.PaymentMethod
 import breez_sdk_spark.PaymentType
 import breez_sdk_spark.SdkException
 import breez_sdk_spark.SdkEvent
 import com.split.android.data.auth.AuthManager
 import com.split.android.data.pricing.BtcPriceRepository
+import com.split.android.data.rewards.RewardTrace
 import com.split.android.data.rewards.RewardsRepository
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
@@ -425,7 +424,17 @@ class WalletManager(
         val existingState = _state.value
         require(existingState is WalletState.Ready) { "Wallet is not ready yet." }
 
+        RewardTrace.i(
+            "root sendPrepared start backend=${preparedPayment.preview.backend} " +
+                "rewardEligible=${preparedPayment.preview.rewardEligible} " +
+                "merchantHashFp=${RewardTrace.fp(preparedPayment.preview.merchantPubkeyHash)} " +
+                "dest=${RewardTrace.present(preparedPayment.preview.destinationPubkey)} " +
+                "destFp=${RewardTrace.fp(preparedPayment.preview.destinationPubkey)} " +
+                "paymentHash=${RewardTrace.present(preparedPayment.preview.paymentHash)} " +
+                "paymentHashFp=${RewardTrace.fp(preparedPayment.preview.paymentHash)}"
+        )
         val result = sparkWalletClient.sendPreparedPayment(preparedPayment)
+        RewardTrace.i("root sendPrepared result=${result.javaClass.simpleName}")
         walletRefreshScope.launch {
             runCatching {
                 refreshWalletState()
@@ -658,6 +667,12 @@ class WalletManager(
             sparkWalletClient.attachEventListener { event ->
                 when (event) {
                     is SdkEvent.PaymentSucceeded -> {
+                        RewardTrace.i(
+                            "root event PaymentSucceeded id=${RewardTrace.id(event.payment.id)} " +
+                                "status=${event.payment.status} type=${event.payment.paymentType} " +
+                                "method=${event.payment.method} " +
+                                "details=${event.payment.details?.javaClass?.simpleName ?: "none"}"
+                        )
                         handleSucceededPaymentEvent(event.payment)
                         publishPaymentSuccessIfNeeded(event.payment)
                     }
@@ -826,12 +841,25 @@ class WalletManager(
 
     private suspend fun handleSucceededPaymentEvent(payment: Payment) {
         val paymentId = payment.id.trim()
-        if (paymentId.isBlank() || processedPaymentIds.contains(paymentId)) {
+        val duplicate = processedPaymentIds.contains(paymentId)
+        if (paymentId.isBlank() || duplicate) {
+            RewardTrace.i(
+                "root handleSucceeded skip duplicate-or-blank id=${RewardTrace.id(payment.id)} " +
+                    "blank=${paymentId.isBlank()} duplicate=$duplicate"
+            )
             return
         }
         processedPaymentIds.add(paymentId)
 
         val row = payment.toWalletTransactionRow()
+        RewardTrace.i(
+            "root handleSucceeded start id=${RewardTrace.id(paymentId)} " +
+                "rowNetwork=${row.network} rowAmountSats=${row.amountSats} " +
+                "rowInvoice=${RewardTrace.present(row.invoice)} " +
+                "rowPaymentHash=${RewardTrace.present(row.paymentHash)} " +
+                "rowPreimage=${RewardTrace.present(row.preimage)} " +
+                "rowDest=${RewardTrace.present(row.destinationPubkey)}"
+        )
         val walletPubkey = runCatching {
             sparkWalletClient.currentWalletPubkey()
         }.getOrNull()
@@ -852,25 +880,97 @@ class WalletManager(
             ?: fallbackUsdAmountCents(row.amountSats)
 
         runCatching {
-            rewardsRepository.postRewardSpend(
-                direction = paymentDirection(payment),
-                usdAmountCents = usdAmountCents,
-                btcAmountSats = row.amountSats,
-                destinationPubkey = (payment.details as? PaymentDetails.Lightning)
-                    ?.destinationPubkey
-                    ?.trim()
-                    ?.ifBlank { null },
-                network = rewardSpendNetwork(payment.method),
-                status = "Completed",
-                paymentHash = row.paymentHash?.trim()?.ifBlank { null },
-                authManager = authManager,
-                walletManager = this
+            submitEncryptedRewardClaimForSucceededPayment(
+                payment = payment,
+                row = row,
+                usdAmountCents = usdAmountCents
             )
         }.onFailure { error ->
+            RewardTrace.w(
+                "root reward post failed id=${RewardTrace.id(paymentId)} " +
+                    "error=${error.localizedMessage.orEmpty()}",
+                error
+            )
             println(
-                "WalletManager: failed to post reward spend for $paymentId. ${error.localizedMessage}"
+                "WalletManager: failed to post encrypted reward claim for $paymentId. ${error.localizedMessage}"
             )
         }
+    }
+
+    private suspend fun submitEncryptedRewardClaimForSucceededPayment(
+        payment: Payment,
+        row: WalletTransactionRow,
+        usdAmountCents: Int
+    ) {
+        if (payment.paymentType != PaymentType.SEND) {
+            RewardTrace.i(
+                "root reward skip non-send id=${RewardTrace.id(payment.id)} " +
+                    "type=${payment.paymentType}"
+            )
+            return
+        }
+
+        val proof = payment.rewardClaimProof(row)
+        if (proof == null) {
+            RewardTrace.i(
+                "root reward skip no-proof id=${RewardTrace.id(payment.id)} " +
+                    "details=${payment.details?.javaClass?.simpleName ?: "none"}"
+            )
+            return
+        }
+        RewardTrace.i(
+            "root reward proof id=${RewardTrace.id(payment.id)} " +
+                "dest=${RewardTrace.present(proof.destinationPubkey)} " +
+                "destFp=${RewardTrace.fp(proof.destinationPubkey)} " +
+                "invoice=${RewardTrace.present(proof.invoice)} " +
+                "invoiceLen=${proof.invoice?.length ?: 0} " +
+                "paymentHash=${RewardTrace.present(proof.paymentHash)} " +
+                "paymentHashFp=${RewardTrace.fp(proof.paymentHash)} " +
+                "preimage=${RewardTrace.present(proof.preimage)}"
+        )
+        val destinationPubkey = proof.destinationPubkey ?: run {
+            RewardTrace.i("root reward skip missing-destination id=${RewardTrace.id(payment.id)}")
+            return
+        }
+        val invoice = proof.invoice ?: run {
+            RewardTrace.i("root reward skip missing-invoice id=${RewardTrace.id(payment.id)}")
+            return
+        }
+        val paymentHash = proof.paymentHash ?: run {
+            RewardTrace.i("root reward skip missing-payment-hash id=${RewardTrace.id(payment.id)}")
+            return
+        }
+        val preimage = proof.preimage ?: run {
+            RewardTrace.i("root reward skip missing-preimage id=${RewardTrace.id(payment.id)}")
+            return
+        }
+
+        val rewardsCheck = rewardsRepository.localRewardsCheck(destinationPubkey)
+        RewardTrace.i(
+            "root reward eligibility id=${RewardTrace.id(payment.id)} " +
+                "eligible=${rewardsCheck.rewardEligible} " +
+                "merchantHashFp=${RewardTrace.fp(rewardsCheck.merchantPubkeyHash)}"
+        )
+        if (!rewardsCheck.rewardEligible) {
+            RewardTrace.i("root reward skip not-eligible id=${RewardTrace.id(payment.id)}")
+            return
+        }
+
+        RewardTrace.i("root reward post start id=${RewardTrace.id(payment.id)}")
+        val response = rewardsRepository.postEncryptedRewardSpendClaim(
+            merchantPubkeyHash = rewardsCheck.merchantPubkeyHash,
+            paymentHash = paymentHash,
+            preimage = preimage,
+            btcAmountSats = row.amountSats,
+            usdAmountCents = usdAmountCents,
+            invoice = invoice,
+            authManager = authManager,
+            walletManager = this
+        )
+        RewardTrace.i(
+            "root reward post result id=${RewardTrace.id(payment.id)} " +
+                "ok=${response.ok} applied=${response.rewardSpendApplied}"
+        )
     }
 
     private suspend fun fallbackUsdAmountCents(amountSats: Long): Int {
@@ -887,29 +987,10 @@ class WalletManager(
         return (usd * 100.0).roundToInt()
     }
 
-    private fun paymentDirection(payment: Payment): String {
-        return when (payment.paymentType) {
-            PaymentType.SEND -> "sent"
-            PaymentType.RECEIVE -> "received"
-        }
-    }
-
     private fun paymentResultDirection(payment: Payment): WalletPaymentDirection {
         return when (payment.paymentType) {
             PaymentType.SEND -> WalletPaymentDirection.SENT
             PaymentType.RECEIVE -> WalletPaymentDirection.RECEIVED
-        }
-    }
-
-    private fun rewardSpendNetwork(method: PaymentMethod): String {
-        return when (method) {
-            PaymentMethod.DEPOSIT,
-            PaymentMethod.WITHDRAW -> "onchain"
-
-            PaymentMethod.LIGHTNING,
-            PaymentMethod.SPARK,
-            PaymentMethod.TOKEN,
-            PaymentMethod.UNKNOWN -> "lightning"
         }
     }
 
@@ -946,6 +1027,12 @@ class WalletManager(
             sparkWalletClient.attachEventListener { event ->
                 when (event) {
                     is SdkEvent.PaymentSucceeded -> {
+                        RewardTrace.i(
+                            "root event PaymentSucceeded id=${RewardTrace.id(event.payment.id)} " +
+                                "status=${event.payment.status} type=${event.payment.paymentType} " +
+                                "method=${event.payment.method} " +
+                                "details=${event.payment.details?.javaClass?.simpleName ?: "none"}"
+                        )
                         handleSucceededPaymentEvent(event.payment)
                         publishPaymentSuccessIfNeeded(event.payment)
                     }

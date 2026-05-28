@@ -1,6 +1,7 @@
 package com.split.android.ui.rewards
 
 import androidx.activity.compose.BackHandler
+import com.split.android.core.AppConfig
 import androidx.compose.foundation.BorderStroke
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
@@ -60,7 +61,7 @@ internal val RewardsHowItWorksParagraphs = listOf(
     "You get credited for all of the Bitcoin you spend with verified merchants.",
     "Your Bitcoin reward is determined by your percentage of spend relative to the platform. If you account for 5% of the platform's reward eligible spending, you receive 5% of the Bitcoin rewards pot.",
     "As reward eligible spend grows, we will grow the size of the Bitcoin rewards pool. Our goal is simple: Drive real world Bitcoin transactions.",
-    "If you have any questions, comments, suggestions, or concerns please reach out to support@example.com"
+    "If you have any questions, comments, suggestions, or concerns please reach out to ${AppConfig.supportLightningAddress}"
 )
 
 @Composable

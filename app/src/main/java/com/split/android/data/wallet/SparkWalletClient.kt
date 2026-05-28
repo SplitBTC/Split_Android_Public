@@ -1,7 +1,5 @@
 package com.split.android.data.wallet
 
-import com.split.android.core.AppConfig
-
 import breez_sdk_spark.BreezSdk
 import breez_sdk_spark.BuyBitcoinRequest
 import breez_sdk_spark.ClaimDepositRequest
@@ -35,9 +33,11 @@ import breez_sdk_spark.PaymentStatus
 import breez_sdk_spark.SendPaymentRequest
 import breez_sdk_spark.SignMessageRequest
 import breez_sdk_spark.UpdateContactRequest
+import com.split.android.core.AppConfig
 import breez_sdk_spark.UpdateUserSettingsRequest
 import breez_sdk_spark.connect
 import breez_sdk_spark.defaultConfig
+import com.split.android.data.rewards.RewardTrace
 import java.math.BigInteger
 import java.util.UUID
 
@@ -71,6 +71,7 @@ data class PaymentPreview(
     val lndAmountOverrideSats: Long? = null,
     val destinationPubkey: String? = null,
     val paymentHash: String? = null,
+    val merchantPubkeyHash: String? = null,
     val rewardEligible: Boolean? = null
 )
 
@@ -266,15 +267,11 @@ class BreezSparkWalletClient : SparkWalletClient {
         val trimmedInvoice = invoice.trim()
         if (!LndLightningPaymentResolver.isBolt11(trimmedInvoice)) return null
 
-        return when (val parsed = currentSdk.parse(trimmedInvoice)) {
-            is InputType.Bolt11Invoice -> Bolt11InvoiceMetadata(
-                amountSats = parsed.v1.amountMsat?.toLong()?.div(1_000L),
-                paymentHash = parsed.v1.paymentHash.trim().ifBlank { null },
-                destinationPubkey = parsed.v1.payeePubkey.trim().ifBlank { null },
-                description = parsed.v1.description?.trim()?.ifBlank { null }
-            )
+        val localMetadata = Bolt11InvoiceMetadataDecoder.decode(trimmedInvoice)
+        return when (val parsed = runCatching { currentSdk.parse(trimmedInvoice) }.getOrNull()) {
+            is InputType.Bolt11Invoice -> parsed.toMetadata(localMetadata)
             else -> null
-        }
+        } ?: localMetadata
     }
 
     override suspend fun prepareOutgoingPayment(
@@ -327,12 +324,7 @@ class BreezSparkWalletClient : SparkWalletClient {
 
             else -> {
                 val bolt11Metadata = (parsed as? InputType.Bolt11Invoice)?.let {
-                    Bolt11InvoiceMetadata(
-                        amountSats = it.v1.amountMsat?.toLong()?.div(1_000L),
-                        paymentHash = it.v1.paymentHash.trim().ifBlank { null },
-                        destinationPubkey = it.v1.payeePubkey.trim().ifBlank { null },
-                        description = it.v1.description?.trim()?.ifBlank { null }
-                    )
+                    it.toMetadata(Bolt11InvoiceMetadataDecoder.decode(trimmedDestination))
                 }
                 val prepareResponse = currentSdk.prepareSendPayment(
                     PrepareSendPaymentRequest(
@@ -411,6 +403,27 @@ class BreezSparkWalletClient : SparkWalletClient {
             }
         }
 
+        val row = payment.toWalletTransactionRow()
+        val proof = payment.rewardClaimProof(row)
+        RewardTrace.i(
+            "spark send returned id=${RewardTrace.id(payment.id)} status=${payment.status} " +
+                "type=${payment.paymentType} method=${payment.method} " +
+                "details=${payment.details?.javaClass?.simpleName ?: "none"} " +
+                "rowInvoice=${RewardTrace.present(row.invoice)} " +
+                "rowPaymentHash=${RewardTrace.present(row.paymentHash)} " +
+                "rowPaymentHashFp=${RewardTrace.fp(row.paymentHash)} " +
+                "rowPreimage=${RewardTrace.present(row.preimage)} " +
+                "rowDest=${RewardTrace.present(row.destinationPubkey)} " +
+                "rowDestFp=${RewardTrace.fp(row.destinationPubkey)} " +
+                "proofDest=${RewardTrace.present(proof?.destinationPubkey)} " +
+                "proofDestFp=${RewardTrace.fp(proof?.destinationPubkey)} " +
+                "proofInvoice=${RewardTrace.present(proof?.invoice)} " +
+                "proofInvoiceLen=${proof?.invoice?.length ?: 0} " +
+                "proofPaymentHash=${RewardTrace.present(proof?.paymentHash)} " +
+                "proofPaymentHashFp=${RewardTrace.fp(proof?.paymentHash)} " +
+                "proofPreimage=${RewardTrace.present(proof?.preimage)}"
+        )
+
         return when (payment.status) {
             PaymentStatus.COMPLETED -> PreparedOutgoingPaymentSendResult.Completed(payment.id)
             PaymentStatus.PENDING -> PreparedOutgoingPaymentSendResult.Pending(payment.id)
@@ -451,6 +464,7 @@ class BreezSparkWalletClient : SparkWalletClient {
         val normalizedAmountSats = amountSats
             ?.takeIf { it > 0 }
             ?.toULong()
+            ?: throw IllegalArgumentException("Enter an amount in sats.")
 
         return currentSdk.buyBitcoin(
             BuyBitcoinRequest.CashApp(amountSats = normalizedAmountSats)
@@ -650,6 +664,17 @@ private fun InputType.fixedBolt11AmountSats(): Long? {
         is InputType.Bolt11Invoice -> v1.amountMsat?.toLong()?.div(1_000L)
         else -> null
     }
+}
+
+private fun InputType.Bolt11Invoice.toMetadata(
+    localMetadata: Bolt11InvoiceMetadata?
+): Bolt11InvoiceMetadata {
+    return Bolt11InvoiceMetadata(
+        amountSats = v1.amountMsat?.toLong()?.div(1_000L) ?: localMetadata?.amountSats,
+        paymentHash = v1.paymentHash.trim().ifBlank { null } ?: localMetadata?.paymentHash,
+        destinationPubkey = v1.payeePubkey.trim().ifBlank { null } ?: localMetadata?.destinationPubkey,
+        description = v1.description?.trim()?.ifBlank { null } ?: localMetadata?.description
+    )
 }
 
 private fun PrepareSendPaymentResponse.feeSatsOrNull(): Long? {

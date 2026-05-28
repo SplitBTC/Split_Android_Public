@@ -1,7 +1,5 @@
 package com.split.android.ui.messages
 
-import com.split.android.core.AppConfig
-
 import android.content.Context
 import android.content.Intent
 import android.graphics.Bitmap
@@ -9,6 +7,7 @@ import android.graphics.BitmapFactory
 import android.graphics.Matrix
 import android.net.Uri
 import android.provider.OpenableColumns
+import com.split.android.core.AppConfig
 import androidx.activity.compose.BackHandler
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts

@@ -53,8 +53,8 @@ android {
         applicationId = splitApplicationId
         minSdk = 29
         targetSdk = 36
-        versionCode = 14
-        versionName = "0.7.0"
+        versionCode = 15
+        versionName = "0.7.1"
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
         manifestPlaceholders["MAPS_API_KEY"] = mapsApiKey
         buildConfigField("String", "MAPS_API_KEY", mapsApiKey.asBuildConfigString())
@@ -122,7 +122,7 @@ dependencies {
     implementation("com.squareup.okhttp3:okhttp:4.12.0")
     implementation("info.guardianproject:tor-android:0.4.9.8")
     implementation("info.guardianproject:jtorctl:0.4.5.7")
-    implementation("breez_sdk_spark:bindings-android:0.13.1")
+    implementation("breez_sdk_spark:bindings-android:0.15.0")
     implementation("androidx.compose.ui:ui")
     implementation("androidx.compose.ui:ui-tooling-preview")
     implementation("androidx.compose.foundation:foundation")

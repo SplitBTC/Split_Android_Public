@@ -106,6 +106,7 @@ import com.split.android.ui.home.WalletTransactionsScreen
 import com.split.android.ui.map.BtcMerchantMapScreen
 import com.split.android.ui.messages.MessagesScreen
 import com.split.android.ui.profile.ProfileScreen
+import com.split.android.ui.profile.ProfileStartRoute
 import com.split.android.ui.profile.SupportChatRequest
 import com.split.android.ui.rewards.WalletRewardsScreen
 import com.split.android.ui.theme.SplitBrandBlue
@@ -1041,6 +1042,7 @@ private fun MainWalletShell(
     var requestedMessageComposeLightningAddress by remember { mutableStateOf<String?>(null) }
     var requestedMessageThread by remember { mutableStateOf<RequestedMessageThread?>(null) }
     var requestedOpenContacts by remember { mutableStateOf(false) }
+    var profileStartRoute by rememberSaveable { mutableStateOf(ProfileStartRoute.HOME) }
     var isLaunchingBuyBitcoin by remember { mutableStateOf(false) }
     var isAppActive by remember { mutableStateOf(true) }
     val unreadMessageCount = remember(storedMessages) {
@@ -1280,6 +1282,12 @@ private fun MainWalletShell(
     }
 
     val openMainTabProfile = {
+        profileStartRoute = ProfileStartRoute.HOME
+        activeOverlay = WalletOverlay.PROFILE
+    }
+
+    val openMainTabAddWallet = {
+        profileStartRoute = ProfileStartRoute.ADD_LIGHTNING_WALLET
         activeOverlay = WalletOverlay.PROFILE
     }
 
@@ -1390,6 +1398,7 @@ private fun MainWalletShell(
                             SpendWalletSource.SPARK_SUBWALLET -> item.walletId?.let(rootViewModel::setSparkSubwalletSpendWallet)
                         }
                     },
+                    onAddWallet = openMainTabAddWallet,
                     onOpenBitcoinEvents = openMainTabBitcoinEvents,
                     onOpenContacts = openMainTabContacts,
                     onOpenProfile = openMainTabProfile,
@@ -1516,9 +1525,14 @@ private fun MainWalletShell(
                 rootViewModel = rootViewModel,
                 walletState = walletState,
                 modifier = Modifier.fillMaxSize(),
-                onClose = { activeOverlay = null }
+                initialRoute = profileStartRoute,
+                onClose = {
+                    activeOverlay = null
+                    profileStartRoute = ProfileStartRoute.HOME
+                }
             ) { request ->
                 activeOverlay = null
+                profileStartRoute = ProfileStartRoute.HOME
 
                 when (request) {
                     is SupportChatRequest.Compose -> {

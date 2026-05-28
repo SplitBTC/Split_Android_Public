@@ -1,7 +1,6 @@
 package com.split.android.data.messages
 
 import com.split.android.core.AppConfig
-
 import org.bouncycastle.asn1.sec.SECNamedCurves
 import org.bouncycastle.crypto.params.ECDomainParameters
 import org.bouncycastle.crypto.params.ECPublicKeyParameters

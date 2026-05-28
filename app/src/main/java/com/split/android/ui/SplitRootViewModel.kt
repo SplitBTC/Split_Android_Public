@@ -41,6 +41,7 @@ import com.split.android.data.rewards.RewardsRepository
 import com.split.android.data.wallet.BreezApiRepository
 import com.split.android.data.wallet.BreezSparkWalletClient
 import com.split.android.data.wallet.ActiveSpendWalletStore
+import com.split.android.data.wallet.Bolt11InvoiceMetadataDecoder
 import com.split.android.data.wallet.CoreLightningBalanceSummary
 import com.split.android.data.wallet.CoreLightningConnectionState
 import com.split.android.data.wallet.CoreLightningCredentialStore
@@ -218,6 +219,9 @@ class SplitRootViewModel(
         breezApiRepository = breezApiRepository,
         sparkWalletClient = sparkSubwalletWalletClient,
         mnemonicGenerator = mnemonicGenerator,
+        rewardsRepository = rewardsRepository,
+        authManager = authManager,
+        walletManager = walletManager,
         onWalletActivity = {
             notifyWalletActivity()
         }
@@ -599,7 +603,9 @@ class SplitRootViewModel(
                 if (!LndLightningPaymentResolver.isBolt11(invoice)) {
                     throw IllegalArgumentException("NWC payments require a Lightning invoice.")
                 }
-                val localMetadata = walletManager.decodeBolt11InvoiceMetadata(invoice)
+                val localMetadata = runCatching {
+                    walletManager.decodeBolt11InvoiceMetadata(invoice)
+                }.getOrNull() ?: Bolt11InvoiceMetadataDecoder.decode(invoice)
                 val lookup = runCatching { nwcWalletManager.lookupInvoice(invoice) }.getOrNull()
                 val resolvedAmountSats = localMetadata?.amountSats?.takeIf { it > 0L }
                     ?: lookup?.amountSats?.takeIf { it > 0L }
@@ -668,28 +674,25 @@ class SplitRootViewModel(
             ?: fallbackMetadata?.paymentHash?.trim()?.ifBlank { null }
 
         val rewardEligible = if (destinationPubkey == null) {
-            false
+            null
         } else {
             runCatching {
-                rewardsRepository.postRewardsCheck(
-                    destinationPubkey = destinationPubkey,
-                    authManager = authManager,
-                    walletManager = walletManager
-                ).rewardEligible
+                rewardsRepository.localRewardsCheck(destinationPubkey)
             }.onFailure { error ->
                 Log.w(
                     "SplitRootViewModel",
                     "Failed to check rewards eligibility. ${error.localizedMessage}",
                     error
                 )
-            }.getOrDefault(false)
+            }.getOrNull()
         }
 
         return preparedPayment.withPreview(
             preview.copy(
                 destinationPubkey = destinationPubkey,
                 paymentHash = paymentHash,
-                rewardEligible = rewardEligible
+                merchantPubkeyHash = rewardEligible?.merchantPubkeyHash,
+                rewardEligible = rewardEligible?.rewardEligible ?: false
             )
         )
     }
@@ -1309,7 +1312,7 @@ class SplitRootViewModel(
         invoice: String,
         source: SpendWalletSource
     ): PaymentDestinationMetadata? {
-        return runCatching {
+        val decodedMetadata = runCatching {
             when (source) {
                 SpendWalletSource.LND -> {
                     val decoded = lndWalletManager.decodeInvoice(invoice)
@@ -1349,6 +1352,14 @@ class SplitRootViewModel(
                 }
             }
         }.getOrNull()
+        val localMetadata = Bolt11InvoiceMetadataDecoder.decode(invoice)
+
+        return PaymentDestinationMetadata(
+            destinationPubkey = decodedMetadata?.destinationPubkey?.trim()?.ifBlank { null }
+                ?: localMetadata?.destinationPubkey?.trim()?.ifBlank { null },
+            paymentHash = decodedMetadata?.paymentHash?.trim()?.ifBlank { null }
+                ?: localMetadata?.paymentHash?.trim()?.ifBlank { null }
+        ).takeIf { it.destinationPubkey != null || it.paymentHash != null }
     }
 
     private suspend fun resolveDestinationMetadataFromWallet(
@@ -2299,7 +2310,8 @@ class SplitRootViewModel(
         notifyWalletActivity()
         launchLndPostSendReconciliation(
             preview = preview,
-            paidPaymentHash = response.paymentHash
+            paidPaymentHash = response.paymentHash,
+            preimage = response.paymentPreimage
         )
     }
 
@@ -2313,14 +2325,17 @@ class SplitRootViewModel(
             nwcWalletManager.restoreActiveWallet()
         }
 
-        nwcWalletManager.payInvoice(
+        val response = nwcWalletManager.payInvoice(
             bolt11 = preview.destination,
             amountSats = preview.lndAmountOverrideSats
         )
 
         walletManager.showOutgoingPaymentSuccess()
         notifyWalletActivity()
-        launchNwcPostSendReconciliation(preview = preview)
+        launchNwcPostSendReconciliation(
+            preview = preview,
+            preimage = response.preimage
+        )
     }
 
     private suspend fun sendPreparedCoreLightningPayment(preview: PaymentPreview) = withContext(NonCancellable) {
@@ -2350,7 +2365,8 @@ class SplitRootViewModel(
         notifyWalletActivity()
         launchCoreLightningPostSendReconciliation(
             preview = preview,
-            paidPaymentHash = response.paymentHash
+            paidPaymentHash = response.paymentHash,
+            preimage = response.paymentPreimage
         )
     }
 
@@ -2381,7 +2397,8 @@ class SplitRootViewModel(
         notifyWalletActivity()
         launchEclairPostSendReconciliation(
             preview = preview,
-            paidPaymentHash = response.paymentHash
+            paidPaymentHash = response.paymentHash,
+            preimage = response.paymentPreimage
         )
     }
 
@@ -2403,19 +2420,13 @@ class SplitRootViewModel(
                 walletManager.suppressOutgoingSuccessToastForPayment(result.paymentId)
                 walletManager.showOutgoingPaymentSuccess()
                 notifyWalletActivity()
-                launchSparkSubwalletPostSendReconciliation(
-                    preview = preview,
-                    paidPaymentId = result.paymentId
-                )
+                launchSparkSubwalletPostSendReconciliation()
             }
 
             is PreparedOutgoingPaymentSendResult.Pending -> {
                 result.paymentId?.let(walletManager::suppressOutgoingSuccessToastForPayment)
                 notifyWalletActivity()
-                launchSparkSubwalletPostSendReconciliation(
-                    preview = preview,
-                    paidPaymentId = result.paymentId
-                )
+                launchSparkSubwalletPostSendReconciliation()
             }
 
             is PreparedOutgoingPaymentSendResult.Failed -> {
@@ -2431,7 +2442,8 @@ class SplitRootViewModel(
 
     private fun launchLndPostSendReconciliation(
         preview: PaymentPreview,
-        paidPaymentHash: String?
+        paidPaymentHash: String?,
+        preimage: String?
     ) {
         viewModelScope.launch {
             runCatching {
@@ -2456,31 +2468,19 @@ class SplitRootViewModel(
                 )
             }
 
-            runCatching {
-                val usdAmountCents = lndRewardSpendUsdCents(preview.amountSats)
-                rewardsRepository.postRewardSpend(
-                    direction = "sent",
-                    usdAmountCents = usdAmountCents,
-                    btcAmountSats = preview.amountSats,
-                    destinationPubkey = preview.destinationPubkey,
-                    network = "lightning",
-                    status = "Completed",
-                    paymentHash = paidPaymentHash?.trim()?.ifBlank { null }
-                        ?: preview.paymentHash?.trim()?.ifBlank { null },
-                    authManager = authManager,
-                    walletManager = walletManager
-                )
-            }.onFailure { error ->
-                Log.w(
-                    "SplitRootViewModel",
-                    "Failed to post LND reward spend. ${error.localizedMessage}",
-                    error
-                )
-            }
+            submitPreparedPaymentRewardClaim(
+                preview = preview,
+                paidPaymentHash = paidPaymentHash,
+                preimage = preimage,
+                source = "LND"
+            )
         }
     }
 
-    private fun launchNwcPostSendReconciliation(preview: PaymentPreview) {
+    private fun launchNwcPostSendReconciliation(
+        preview: PaymentPreview,
+        preimage: String?
+    ) {
         viewModelScope.launch {
             runCatching {
                 val rows = nwcWalletManager.fetchTransactionRows()
@@ -2507,32 +2507,19 @@ class SplitRootViewModel(
                 )
             }
 
-            runCatching {
-                val usdAmountCents = lndRewardSpendUsdCents(preview.amountSats)
-                rewardsRepository.postRewardSpend(
-                    direction = "sent",
-                    usdAmountCents = usdAmountCents,
-                    btcAmountSats = preview.amountSats,
-                    destinationPubkey = preview.destinationPubkey,
-                    network = "lightning",
-                    status = "Completed",
-                    paymentHash = preview.paymentHash?.trim()?.ifBlank { null },
-                    authManager = authManager,
-                    walletManager = walletManager
-                )
-            }.onFailure { error ->
-                Log.w(
-                    "SplitRootViewModel",
-                    "Failed to post NWC reward spend. ${error.localizedMessage}",
-                    error
-                )
-            }
+            submitPreparedPaymentRewardClaim(
+                preview = preview,
+                paidPaymentHash = null,
+                preimage = preimage,
+                source = "NWC"
+            )
         }
     }
 
     private fun launchCoreLightningPostSendReconciliation(
         preview: PaymentPreview,
-        paidPaymentHash: String?
+        paidPaymentHash: String?,
+        preimage: String?
     ) {
         viewModelScope.launch {
             runCatching {
@@ -2560,33 +2547,19 @@ class SplitRootViewModel(
                 )
             }
 
-            runCatching {
-                val usdAmountCents = lndRewardSpendUsdCents(preview.amountSats)
-                rewardsRepository.postRewardSpend(
-                    direction = "sent",
-                    usdAmountCents = usdAmountCents,
-                    btcAmountSats = preview.amountSats,
-                    destinationPubkey = preview.destinationPubkey,
-                    network = "lightning",
-                    status = "Completed",
-                    paymentHash = paidPaymentHash?.trim()?.ifBlank { null }
-                        ?: preview.paymentHash?.trim()?.ifBlank { null },
-                    authManager = authManager,
-                    walletManager = walletManager
-                )
-            }.onFailure { error ->
-                Log.w(
-                    "SplitRootViewModel",
-                    "Failed to post Core Lightning reward spend. ${error.localizedMessage}",
-                    error
-                )
-            }
+            submitPreparedPaymentRewardClaim(
+                preview = preview,
+                paidPaymentHash = paidPaymentHash,
+                preimage = preimage,
+                source = "Core Lightning"
+            )
         }
     }
 
     private fun launchEclairPostSendReconciliation(
         preview: PaymentPreview,
-        paidPaymentHash: String?
+        paidPaymentHash: String?,
+        preimage: String?
     ) {
         viewModelScope.launch {
             runCatching {
@@ -2614,34 +2587,16 @@ class SplitRootViewModel(
                 )
             }
 
-            runCatching {
-                val usdAmountCents = lndRewardSpendUsdCents(preview.amountSats)
-                rewardsRepository.postRewardSpend(
-                    direction = "sent",
-                    usdAmountCents = usdAmountCents,
-                    btcAmountSats = preview.amountSats,
-                    destinationPubkey = preview.destinationPubkey,
-                    network = "lightning",
-                    status = "Completed",
-                    paymentHash = paidPaymentHash?.trim()?.ifBlank { null }
-                        ?: preview.paymentHash?.trim()?.ifBlank { null },
-                    authManager = authManager,
-                    walletManager = walletManager
-                )
-            }.onFailure { error ->
-                Log.w(
-                    "SplitRootViewModel",
-                    "Failed to post Eclair reward spend. ${error.localizedMessage}",
-                    error
-                )
-            }
+            submitPreparedPaymentRewardClaim(
+                preview = preview,
+                paidPaymentHash = paidPaymentHash,
+                preimage = preimage,
+                source = "Eclair"
+            )
         }
     }
 
-    private fun launchSparkSubwalletPostSendReconciliation(
-        preview: PaymentPreview,
-        paidPaymentId: String?
-    ) {
+    private fun launchSparkSubwalletPostSendReconciliation() {
         viewModelScope.launch {
             runCatching {
                 val rows = sparkSubwalletManager.fetchTransactionRows()
@@ -2667,28 +2622,36 @@ class SplitRootViewModel(
                     error
                 )
             }
+        }
+    }
 
-            runCatching {
-                val usdAmountCents = lndRewardSpendUsdCents(preview.amountSats)
-                rewardsRepository.postRewardSpend(
-                    direction = "sent",
-                    usdAmountCents = usdAmountCents,
-                    btcAmountSats = preview.amountSats,
-                    destinationPubkey = preview.destinationPubkey,
-                    network = "lightning",
-                    status = "Completed",
-                    paymentHash = preview.paymentHash?.trim()?.ifBlank { null }
-                        ?: paidPaymentId?.trim()?.ifBlank { null },
-                    authManager = authManager,
-                    walletManager = walletManager
-                )
-            }.onFailure { error ->
-                Log.w(
-                    "SplitRootViewModel",
-                    "Failed to post Spark sub-wallet reward spend. ${error.localizedMessage}",
-                    error
-                )
-            }
+    private suspend fun submitPreparedPaymentRewardClaim(
+        preview: PaymentPreview,
+        paidPaymentHash: String?,
+        preimage: String?,
+        source: String
+    ) {
+        if (preview.rewardEligible != true) return
+
+        runCatching {
+            val paymentHash = paidPaymentHash?.trim()?.ifBlank { null }
+                ?: preview.paymentHash?.trim()?.ifBlank { null }
+            rewardsRepository.postEncryptedRewardSpendClaim(
+                merchantPubkeyHash = preview.merchantPubkeyHash,
+                paymentHash = paymentHash,
+                preimage = preimage,
+                btcAmountSats = preview.amountSats,
+                usdAmountCents = lndRewardSpendUsdCents(preview.amountSats),
+                invoice = preview.destination,
+                authManager = authManager,
+                walletManager = walletManager
+            )
+        }.onFailure { error ->
+            Log.w(
+                "SplitRootViewModel",
+                "Failed to post $source encrypted reward claim. ${error.localizedMessage}",
+                error
+            )
         }
     }
 
