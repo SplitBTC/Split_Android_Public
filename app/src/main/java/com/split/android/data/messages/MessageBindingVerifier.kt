@@ -11,8 +11,11 @@ import java.math.BigInteger
 
 object MessageBindingVerifier {
     private val supportedBindingSignatureVersions = setOf(1, 2)
+    private const val MESSAGING_IDENTITY_V4_SIGNATURE_VERSION = 4
     private val supportedEnvelopeSignatureVersions = setOf(1, 2)
+    private const val MESSAGING_ENVELOPE_V4_SIGNATURE_VERSION = 3
     private val MESSAGING_IDENTITY_DOMAIN = AppConfig.messagingIdentityDomain
+    private const val MESSAGING_IDENTITY_V4_DOMAIN = "splitrewards.messaging"
     private val curveParams = SECNamedCurves.getByName("secp256k1")
     private val domainParameters = ECDomainParameters(
         curveParams.curve,
@@ -25,6 +28,12 @@ object MessageBindingVerifier {
         verifyBinding(recipient.identityBindingPayload)
     }
 
+    fun verifyRecipientBindingV4(recipient: MessagingRecipient) {
+        val binding = recipient.identityBindingPayloadV4
+            ?: throw IllegalArgumentException("Recipient messaging identity is incomplete.")
+        verifyBindingV4(binding)
+    }
+
     fun verifyBinding(binding: MessagingIdentityBindingPayload) {
         require(binding.messagingIdentitySignatureVersion in supportedBindingSignatureVersions) {
             "Unsupported messaging identity signature version."
@@ -34,6 +43,35 @@ object MessageBindingVerifier {
             version = binding.messagingIdentitySignatureVersion,
             walletPubkey = binding.walletPubkey,
             lightningAddress = binding.lightningAddress,
+            messagingPubkey = binding.messagingPubkey,
+            signedAtSeconds = binding.messagingIdentitySignedAtSeconds
+        )
+
+        verifySignedMessage(
+            canonicalMessage = canonicalMessage,
+            walletPubkey = binding.walletPubkey,
+            signatureHex = binding.messagingIdentitySignature,
+            invalidSignatureMessage = "Recipient messaging identity signature could not be verified."
+        )
+    }
+
+    fun verifyBindingV4(binding: MessagingIdentityBindingPayloadV4) {
+        require(binding.messagingIdentitySignatureVersion == MESSAGING_IDENTITY_V4_SIGNATURE_VERSION) {
+            "Unsupported messaging identity signature version."
+        }
+
+        val normalizedHash = binding.lightningAddressHash.trim().lowercase()
+        require(normalizedHash.length == 64 && normalizedHash.all { it.isDigit() || it.lowercaseChar() in 'a'..'f' }) {
+            "Recipient Lightning address hash is invalid."
+        }
+        require(binding.lightningAddressHashScheme.trim() == MessagingPrivacyV4.LIGHTNING_ADDRESS_CLIENT_HASH_SCHEME) {
+            "Recipient Lightning address hash is invalid."
+        }
+
+        val canonicalMessage = buildMessagingIdentityBindingMessageV4(
+            version = binding.messagingIdentitySignatureVersion,
+            walletPubkey = binding.walletPubkey,
+            lightningAddressHash = normalizedHash,
             messagingPubkey = binding.messagingPubkey,
             signedAtSeconds = binding.messagingIdentitySignedAtSeconds
         )
@@ -59,6 +97,25 @@ object MessageBindingVerifier {
         domain=$MESSAGING_IDENTITY_DOMAIN
         walletPubkey=$walletPubkey
         lightningAddress=$lightningAddress
+        messagingPubkey=$messagingPubkey
+        signedAt=$signedAtSeconds
+        """.trimIndent()
+    }
+
+    fun buildMessagingIdentityBindingMessageV4(
+        version: Int,
+        walletPubkey: String,
+        lightningAddressHash: String,
+        messagingPubkey: String,
+        signedAtSeconds: Long
+    ): String {
+        return """
+        SplitRewards Messaging Identity Authorization
+        version=$version
+        domain=$MESSAGING_IDENTITY_V4_DOMAIN
+        hashScheme=${MessagingPrivacyV4.LIGHTNING_ADDRESS_CLIENT_HASH_SCHEME}
+        walletPubkey=$walletPubkey
+        lightningAddressHash=$lightningAddressHash
         messagingPubkey=$messagingPubkey
         signedAt=$signedAtSeconds
         """.trimIndent()
@@ -98,6 +155,28 @@ object MessageBindingVerifier {
         """.trimIndent()
     }
 
+    fun buildMessagingDeviceRegistrationMessageV4(
+        version: Int,
+        walletPubkey: String,
+        messagingPubkey: String,
+        platform: String,
+        environment: String,
+        deviceToken: String,
+        signedAtSeconds: Long
+    ): String {
+        return """
+        SplitRewards Messaging Device Registration
+        version=$version
+        domain=$MESSAGING_IDENTITY_V4_DOMAIN
+        walletPubkey=$walletPubkey
+        messagingPubkey=$messagingPubkey
+        platform=$platform
+        environment=$environment
+        deviceToken=$deviceToken
+        signedAt=$signedAtSeconds
+        """.trimIndent()
+    }
+
     fun buildMessagingSigningKeyBindingMessage(
         version: Int,
         walletPubkey: String,
@@ -112,6 +191,27 @@ object MessageBindingVerifier {
         domain=$MESSAGING_IDENTITY_DOMAIN
         walletPubkey=$walletPubkey
         lightningAddress=$lightningAddress
+        messagingPubkey=$messagingPubkey
+        messagingSigningPubkey=$messagingSigningPubkey
+        signedAt=$signedAtSeconds
+        """.trimIndent()
+    }
+
+    fun buildMessagingSigningKeyBindingMessageV4(
+        version: Int,
+        walletPubkey: String,
+        lightningAddressHash: String,
+        messagingPubkey: String,
+        messagingSigningPubkey: String,
+        signedAtSeconds: Long
+    ): String {
+        return """
+        SplitRewards Messaging Signing Key Authorization
+        version=$version
+        domain=$MESSAGING_IDENTITY_V4_DOMAIN
+        hashScheme=${MessagingPrivacyV4.LIGHTNING_ADDRESS_CLIENT_HASH_SCHEME}
+        walletPubkey=$walletPubkey
+        lightningAddressHash=$lightningAddressHash
         messagingPubkey=$messagingPubkey
         messagingSigningPubkey=$messagingSigningPubkey
         signedAt=$signedAtSeconds
@@ -140,6 +240,58 @@ object MessageBindingVerifier {
             signatureHex = certificate.messagingSigningPubkeySignature,
             invalidSignatureMessage = "Recipient messaging identity signature could not be verified."
         )
+    }
+
+    fun verifyMessagingSigningCertificateV4(
+        certificate: MessageSigningCertificateV4
+    ) {
+        require(certificate.messagingSigningPubkeySignatureVersion == 2) {
+            "Unsupported messaging identity signature version."
+        }
+
+        val canonicalMessage = buildMessagingSigningKeyBindingMessageV4(
+            version = certificate.messagingSigningPubkeySignatureVersion,
+            walletPubkey = certificate.walletPubkey,
+            lightningAddressHash = certificate.lightningAddressHash,
+            messagingPubkey = certificate.messagingPubkey,
+            messagingSigningPubkey = certificate.messagingSigningPubkey,
+            signedAtSeconds = certificate.messagingSigningPubkeySignedAt
+        )
+
+        verifySignedMessage(
+            canonicalMessage = canonicalMessage,
+            walletPubkey = certificate.walletPubkey,
+            signatureHex = certificate.messagingSigningPubkeySignature,
+            invalidSignatureMessage = "Recipient messaging identity signature could not be verified."
+        )
+    }
+
+    fun buildMessagingEnvelopeSignatureMessageV4(
+        version: Int,
+        clientMessageId: String,
+        senderBinding: MessagingIdentityBindingPayloadV4,
+        recipientBinding: MessagingIdentityBindingPayloadV4,
+        messageType: String,
+        plaintext: String,
+        createdAtClientMs: Long,
+        envelopeVersion: Int
+    ): String {
+        return """
+        SplitRewards Messaging Envelope Authorization
+        version=$version
+        domain=$MESSAGING_IDENTITY_V4_DOMAIN
+        clientMessageId=$clientMessageId
+        senderWalletPubkey=${senderBinding.walletPubkey}
+        senderLightningAddressHash=${senderBinding.lightningAddressHash}
+        senderMessagingPubkey=${senderBinding.messagingPubkey}
+        recipientWalletPubkey=${recipientBinding.walletPubkey}
+        recipientLightningAddressHash=${recipientBinding.lightningAddressHash}
+        recipientMessagingPubkey=${recipientBinding.messagingPubkey}
+        messageType=$messageType
+        plaintext=$plaintext
+        createdAtClientMs=$createdAtClientMs
+        envelopeVersion=$envelopeVersion
+        """.trimIndent()
     }
 
     fun buildMessagingEnvelopeSignatureMessage(
@@ -231,8 +383,10 @@ object MessageBindingVerifier {
             version = senderEnvelopeSignatureVersion,
             clientMessageId = message.clientMessageId,
             senderBinding = senderBinding,
-            recipientWalletPubkey = message.recipientWalletPubkey,
-            recipientLightningAddress = message.recipientLightningAddress,
+            recipientWalletPubkey = message.recipientWalletPubkey
+                ?: throw IllegalArgumentException("The message timestamp is missing."),
+            recipientLightningAddress = message.recipientLightningAddress
+                ?: throw IllegalArgumentException("The message timestamp is missing."),
             recipientMessagingPubkey = message.recipientMessagingPubkey,
             messageType = message.messageType,
             ciphertext = ciphertext,
@@ -278,9 +432,57 @@ object MessageBindingVerifier {
             version = sealedPayload.messageSignatureVersion,
             clientMessageId = message.clientMessageId,
             senderBinding = sealedPayload.sender,
-            recipientWalletPubkey = message.recipientWalletPubkey,
-            recipientLightningAddress = message.recipientLightningAddress,
+            recipientWalletPubkey = message.recipientWalletPubkey
+                ?: throw IllegalArgumentException("The message timestamp is missing."),
+            recipientLightningAddress = message.recipientLightningAddress
+                ?: throw IllegalArgumentException("The message timestamp is missing."),
             recipientMessagingPubkey = message.recipientMessagingPubkey,
+            messageType = message.messageType,
+            plaintext = sealedPayload.body,
+            createdAtClientMs = createdAtClientMillis,
+            envelopeVersion = message.envelopeVersion
+        )
+
+        verifyMessagingSignature(
+            canonicalMessage = canonicalMessage,
+            messagingSigningPubkey = sealedPayload.messagingSigningPubkey,
+            signatureHex = sealedPayload.messageSignature,
+            invalidSignatureMessage = "The sender message signature could not be verified."
+        )
+    }
+
+    fun verifySealedIncomingEnvelopeV4(
+        message: InboxMessage,
+        sealedPayload: SealedSenderMessagePayloadV4,
+        recipientBinding: MessagingIdentityBindingPayloadV4
+    ) {
+        require(sealedPayload.messageSignatureVersion == MESSAGING_ENVELOPE_V4_SIGNATURE_VERSION) {
+            "Unsupported messaging envelope signature version."
+        }
+
+        val createdAtClientMillis = message.createdAtClientMillis
+            ?: throw IllegalArgumentException("The message timestamp is missing.")
+
+        verifyBindingV4(sealedPayload.sender)
+        verifyBindingV4(recipientBinding)
+        verifyMessagingSigningCertificateV4(
+            MessageSigningCertificateV4(
+                walletPubkey = sealedPayload.sender.walletPubkey,
+                lightningAddressHash = sealedPayload.sender.lightningAddressHash,
+                lightningAddressHashScheme = sealedPayload.sender.lightningAddressHashScheme,
+                messagingPubkey = sealedPayload.sender.messagingPubkey,
+                messagingSigningPubkey = sealedPayload.messagingSigningPubkey,
+                messagingSigningPubkeySignature = sealedPayload.messagingSigningPubkeySignature,
+                messagingSigningPubkeySignatureVersion = sealedPayload.messagingSigningPubkeySignatureVersion,
+                messagingSigningPubkeySignedAt = sealedPayload.messagingSigningPubkeySignedAt
+            )
+        )
+
+        val canonicalMessage = buildMessagingEnvelopeSignatureMessageV4(
+            version = sealedPayload.messageSignatureVersion,
+            clientMessageId = message.clientMessageId,
+            senderBinding = sealedPayload.sender,
+            recipientBinding = recipientBinding,
             messageType = message.messageType,
             plaintext = sealedPayload.body,
             createdAtClientMs = createdAtClientMillis,

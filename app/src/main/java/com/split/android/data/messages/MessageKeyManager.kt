@@ -27,9 +27,9 @@ class MessageKeyManager(
         val claimsActiveBinding: Boolean,
         val requiresDirectoryProof: Boolean
     ) {
-        V3(
-            path = "/messaging/v3/identity",
-            signatureVersion = 2,
+        V4(
+            path = "/messaging/v4/identity",
+            signatureVersion = 4,
             claimsActiveBinding = true,
             requiresDirectoryProof = false
         )
@@ -50,15 +50,13 @@ class MessageKeyManager(
         authManager: AuthManager,
         walletManager: WalletManager
     ): RegistrationResponse {
-        val identityEndpoint = IdentityEndpoint.V3
+        val identityEndpoint = IdentityEndpoint.V4
         authManager.ensureSession(walletManager)
 
         val walletPubkey = walletManager.currentWalletPubkey()
-        val lightningAddress = fetchLocalLightningAddressWithRetry(walletManager)
-            ?.trim()
-            ?.lowercase()
-            ?.takeIf { it.isNotEmpty() }
+        val lightningAddress = fetchLocalLightningAddressForV4Send(walletManager)
             ?: throw IllegalStateException("Create a Lightning Address before activating messaging.")
+        val lightningAddressHash = MessagingPrivacyV4.lightningAddressClientHash(lightningAddress)
         val current = fetchCurrentRegistration(identityEndpoint, authManager, walletManager)
         val currentMessagingPubkey = current.messagingPubkey
             ?.trim()
@@ -69,6 +67,7 @@ class MessageKeyManager(
         var localIdentity = LocalIdentity(
             walletPubkey = walletPubkey,
             lightningAddress = lightningAddress,
+            lightningAddressHash = lightningAddressHash,
             messagingPubkey = keyState.publicKeyHex
         )
 
@@ -95,10 +94,10 @@ class MessageKeyManager(
         }
 
         val signedAtSeconds = System.currentTimeMillis() / 1000L
-        val canonicalMessage = MessageBindingVerifier.buildMessagingIdentityBindingMessage(
+        val canonicalMessage = MessageBindingVerifier.buildMessagingIdentityBindingMessageV4(
             version = identityEndpoint.signatureVersion,
             walletPubkey = localIdentity.walletPubkey,
-            lightningAddress = localIdentity.lightningAddress,
+            lightningAddressHash = localIdentity.lightningAddressHash,
             messagingPubkey = localIdentity.messagingPubkey,
             signedAtSeconds = signedAtSeconds
         )
@@ -111,7 +110,8 @@ class MessageKeyManager(
 
         val requestBody = JSONObject()
             .put("walletPubkey", signedMessage.pubkey)
-            .put("lightningAddress", localIdentity.lightningAddress)
+            .put("lightningAddressHash", localIdentity.lightningAddressHash)
+            .put("lightningAddressHashScheme", MessagingPrivacyV4.LIGHTNING_ADDRESS_CLIENT_HASH_SCHEME)
             .put("messagingPubkey", localIdentity.messagingPubkey)
             .put("messagingIdentitySignature", signedMessage.signature)
             .put("messagingIdentitySignatureVersion", identityEndpoint.signatureVersion)
@@ -206,6 +206,48 @@ class MessageKeyManager(
         return certificate
     }
 
+    suspend fun currentMessageSigningCertificateV4(
+        senderBinding: MessagingIdentityBindingPayloadV4,
+        walletManager: WalletManager
+    ): MessageSigningCertificateV4 {
+        val signingPrivateKey = loadOrCreateSigningPrivateKey()
+        val signingPubkey = signingPrivateKey.generatePublicKey().encoded.toHex()
+
+        val existingCertificate = loadSigningCertificateV4IfPresent()
+        if (existingCertificate != null &&
+            isSigningCertificateV4Valid(existingCertificate, senderBinding, signingPubkey)
+        ) {
+            return existingCertificate
+        }
+
+        val signedAtSeconds = System.currentTimeMillis() / 1000L
+        val canonicalMessage = MessageBindingVerifier.buildMessagingSigningKeyBindingMessageV4(
+            version = 2,
+            walletPubkey = senderBinding.walletPubkey,
+            lightningAddressHash = senderBinding.lightningAddressHash,
+            messagingPubkey = senderBinding.messagingPubkey,
+            messagingSigningPubkey = signingPubkey,
+            signedAtSeconds = signedAtSeconds
+        )
+        val signedMessage = walletManager.signAuthMessage(canonicalMessage)
+        require(signedMessage.pubkey.trim().lowercase() == senderBinding.walletPubkey.lowercase()) {
+            "Invalid messaging signing key certificate response."
+        }
+
+        val certificate = MessageSigningCertificateV4(
+            walletPubkey = senderBinding.walletPubkey,
+            lightningAddressHash = senderBinding.lightningAddressHash,
+            lightningAddressHashScheme = senderBinding.lightningAddressHashScheme,
+            messagingPubkey = senderBinding.messagingPubkey,
+            messagingSigningPubkey = signingPubkey,
+            messagingSigningPubkeySignature = signedMessage.signature,
+            messagingSigningPubkeySignatureVersion = 2,
+            messagingSigningPubkeySignedAt = signedAtSeconds
+        )
+        saveSigningCertificateV4(certificate)
+        return certificate
+    }
+
     fun signMessageEnvelope(canonicalMessage: String): String {
         val signingPrivateKey = loadOrCreateSigningPrivateKey()
         val messageBytes = canonicalMessage.toByteArray(Charsets.UTF_8)
@@ -290,14 +332,14 @@ class MessageKeyManager(
         identityEndpoint: IdentityEndpoint,
         localIdentity: LocalIdentity
     ): Boolean {
-        val binding = response.identityBindingPayload ?: return false
+        val binding = response.identityBindingPayloadV4 ?: return false
         if (binding.messagingIdentitySignatureVersion != identityEndpoint.signatureVersion) {
             return false
         }
         if (binding.walletPubkey.lowercase() != localIdentity.walletPubkey.lowercase()) {
             return false
         }
-        if (binding.lightningAddress != localIdentity.lightningAddress) {
+        if (binding.lightningAddressHash != localIdentity.lightningAddressHash) {
             return false
         }
         if (binding.messagingPubkey != localIdentity.messagingPubkey) {
@@ -305,16 +347,7 @@ class MessageKeyManager(
         }
 
         return runCatching {
-            MessageBindingVerifier.verifyBinding(binding)
-            val directory = response.directory
-            if (directory == null) {
-                require(!identityEndpoint.requiresDirectoryProof) {
-                    "The messaging directory proof is missing."
-                }
-            } else {
-                MessageDirectoryVerifier.verifyDirectoryProof(binding, directory)
-                storeDirectoryCheckpointIfNewer(directory.checkpoint)
-            }
+            MessageBindingVerifier.verifyBindingV4(binding)
         }.isSuccess
     }
 
@@ -334,28 +367,31 @@ class MessageKeyManager(
         return lastResult
     }
 
+    suspend fun fetchLocalLightningAddressForV4Send(walletManager: WalletManager): String? {
+        return fetchLocalLightningAddressWithRetry(walletManager)
+            ?.let { MessagingPrivacyV4.normalizeLightningAddress(it) }
+    }
+
     private suspend fun rotateMessagingIdentity(
         authManager: AuthManager,
         walletManager: WalletManager,
         reason: String
     ): RegistrationResponse {
-        val identityEndpoint = IdentityEndpoint.V3
+        val identityEndpoint = IdentityEndpoint.V4
         authManager.ensureSession(walletManager)
 
         val walletPubkey = walletManager.currentWalletPubkey()
-        val lightningAddress = fetchLocalLightningAddressWithRetry(walletManager)
-            ?.trim()
-            ?.lowercase()
-            ?.takeIf { it.isNotEmpty() }
+        val lightningAddress = fetchLocalLightningAddressForV4Send(walletManager)
             ?: throw IllegalStateException("Create a Lightning Address before activating messaging.")
+        val lightningAddressHash = MessagingPrivacyV4.lightningAddressClientHash(lightningAddress)
         val keyState = rotateMessagingPrivateKey()
         clearSigningMaterial()
 
         val signedAtSeconds = System.currentTimeMillis() / 1000L
-        val canonicalMessage = MessageBindingVerifier.buildMessagingIdentityBindingMessage(
+        val canonicalMessage = MessageBindingVerifier.buildMessagingIdentityBindingMessageV4(
             version = identityEndpoint.signatureVersion,
             walletPubkey = walletPubkey,
-            lightningAddress = lightningAddress,
+            lightningAddressHash = lightningAddressHash,
             messagingPubkey = keyState.publicKeyHex,
             signedAtSeconds = signedAtSeconds
         )
@@ -366,7 +402,8 @@ class MessageKeyManager(
 
         val requestBody = JSONObject()
             .put("walletPubkey", signedMessage.pubkey)
-            .put("lightningAddress", lightningAddress)
+            .put("lightningAddressHash", lightningAddressHash)
+            .put("lightningAddressHashScheme", MessagingPrivacyV4.LIGHTNING_ADDRESS_CLIENT_HASH_SCHEME)
             .put("messagingPubkey", keyState.publicKeyHex)
             .put("messagingIdentitySignature", signedMessage.signature)
             .put("messagingIdentitySignatureVersion", identityEndpoint.signatureVersion)
@@ -386,6 +423,7 @@ class MessageKeyManager(
         val localIdentity = LocalIdentity(
             walletPubkey = walletPubkey,
             lightningAddress = lightningAddress,
+            lightningAddressHash = lightningAddressHash,
             messagingPubkey = keyState.publicKeyHex
         )
         val registration = response.body.toRegistrationResponse()
@@ -558,8 +596,14 @@ class MessageKeyManager(
         return listOf(
             KEY_MESSAGING_SIGNING_CERTIFICATE,
             "$KEY_MESSAGING_SIGNING_CERTIFICATE.dev",
-            "$KEY_MESSAGING_SIGNING_CERTIFICATE.prod"
+            "$KEY_MESSAGING_SIGNING_CERTIFICATE.prod",
+            "$KEY_MESSAGING_SIGNING_CERTIFICATE_V4.dev",
+            "$KEY_MESSAGING_SIGNING_CERTIFICATE_V4.prod"
         )
+    }
+
+    private fun preferredSigningCertificateV4Key(): String {
+        return "$KEY_MESSAGING_SIGNING_CERTIFICATE_V4.${AppConfig.messagingPushEnvironment}"
     }
 
     private fun preferredDirectoryRootHashKey(): String {
@@ -668,10 +712,58 @@ class MessageKeyManager(
             .apply()
     }
 
+    private fun loadSigningCertificateV4IfPresent(): MessageSigningCertificateV4? {
+        val preferredKey = preferredSigningCertificateV4Key()
+        val stored = preferences().getString(preferredKey, null)
+            ?.trim()
+            ?.takeIf { it.isNotEmpty() }
+            ?: return null
+
+        val certificate = runCatching {
+            val json = JSONObject(stored)
+            MessageSigningCertificateV4(
+                walletPubkey = json.getString("walletPubkey"),
+                lightningAddressHash = json.getString("lightningAddressHash"),
+                lightningAddressHashScheme = json.optString(
+                    "lightningAddressHashScheme",
+                    MessagingPrivacyV4.LIGHTNING_ADDRESS_CLIENT_HASH_SCHEME
+                ),
+                messagingPubkey = json.getString("messagingPubkey"),
+                messagingSigningPubkey = json.getString("messagingSigningPubkey"),
+                messagingSigningPubkeySignature = json.getString("messagingSigningPubkeySignature"),
+                messagingSigningPubkeySignatureVersion = json.getInt("messagingSigningPubkeySignatureVersion"),
+                messagingSigningPubkeySignedAt = json.getLong("messagingSigningPubkeySignedAt")
+            )
+        }.getOrNull()
+        if (certificate == null) {
+            runCatching { preferences().edit().remove(preferredKey).apply() }
+            return null
+        }
+
+        return certificate
+    }
+
+    private fun saveSigningCertificateV4(certificate: MessageSigningCertificateV4) {
+        val json = JSONObject()
+            .put("walletPubkey", certificate.walletPubkey)
+            .put("lightningAddressHash", certificate.lightningAddressHash)
+            .put("lightningAddressHashScheme", certificate.lightningAddressHashScheme)
+            .put("messagingPubkey", certificate.messagingPubkey)
+            .put("messagingSigningPubkey", certificate.messagingSigningPubkey)
+            .put("messagingSigningPubkeySignature", certificate.messagingSigningPubkeySignature)
+            .put("messagingSigningPubkeySignatureVersion", certificate.messagingSigningPubkeySignatureVersion)
+            .put("messagingSigningPubkeySignedAt", certificate.messagingSigningPubkeySignedAt)
+
+        preferences().edit()
+            .putString(preferredSigningCertificateV4Key(), json.toString())
+            .apply()
+    }
+
     private fun clearSigningMaterial() {
         preferences().edit()
             .remove(preferredSigningPrivateKeyKey())
             .remove(preferredSigningCertificateKey())
+            .remove(preferredSigningCertificateV4Key())
             .apply()
     }
 
@@ -691,6 +783,26 @@ class MessageKeyManager(
 
         return runCatching {
             MessageBindingVerifier.verifyMessagingSigningCertificate(certificate)
+        }.isSuccess
+    }
+
+    private fun isSigningCertificateV4Valid(
+        certificate: MessageSigningCertificateV4,
+        senderBinding: MessagingIdentityBindingPayloadV4,
+        signingPubkey: String
+    ): Boolean {
+        if (certificate.walletPubkey.lowercase() != senderBinding.walletPubkey.lowercase() ||
+            certificate.lightningAddressHash.lowercase() != senderBinding.lightningAddressHash.lowercase() ||
+            certificate.lightningAddressHashScheme != senderBinding.lightningAddressHashScheme ||
+            certificate.messagingPubkey.lowercase() != senderBinding.messagingPubkey.lowercase() ||
+            certificate.messagingSigningPubkey.lowercase() != signingPubkey.lowercase() ||
+            certificate.messagingSigningPubkeySignatureVersion != 2
+        ) {
+            return false
+        }
+
+        return runCatching {
+            MessageBindingVerifier.verifyMessagingSigningCertificateV4(certificate)
         }.isSuccess
     }
 
@@ -743,6 +855,7 @@ class MessageKeyManager(
     private data class LocalIdentity(
         val walletPubkey: String,
         val lightningAddress: String,
+        val lightningAddressHash: String,
         val messagingPubkey: String
     )
 
@@ -750,14 +863,18 @@ class MessageKeyManager(
         val ok: Boolean,
         val walletPubkey: String?,
         val lightningAddress: String?,
+        val messagingAccountId: String?,
+        val lightningAddressHash: String?,
+        val lightningAddressHashScheme: String?,
         val didUpdate: Boolean,
         val didRotate: Boolean,
+        val binding: MessagingIdentityBindingPayloadV4?,
         val messagingPubkey: String?,
         val messagingIdentitySignature: String?,
         val messagingIdentitySignatureVersion: Int?,
         val messagingIdentitySignedAtMillis: Long?,
         val messagingIdentityUpdatedAtMillis: Long?,
-        val directory: MessagingDirectoryProofPayload?,
+        val directory: MessagingRegistrationDirectoryV4?,
         val error: String?
     ) {
         val normalizedLightningAddress: String?
@@ -781,23 +898,71 @@ class MessageKeyManager(
                     messagingIdentitySignedAtSeconds = signedAtMillis / 1000L
                 )
             }
+
+        val identityBindingPayloadV4: MessagingIdentityBindingPayloadV4?
+            get() {
+                binding?.let { return it }
+
+                val pubkey = walletPubkey?.trim()?.takeIf { it.isNotEmpty() } ?: return null
+                val hash = lightningAddressHash?.trim()?.lowercase()?.takeIf { it.isNotEmpty() } ?: return null
+                val scheme = lightningAddressHashScheme?.trim()?.takeIf { it.isNotEmpty() } ?: return null
+                val messagePubkey = messagingPubkey?.trim()?.takeIf { it.isNotEmpty() } ?: return null
+                val signature = messagingIdentitySignature?.trim()?.takeIf { it.isNotEmpty() } ?: return null
+                val signatureVersion = messagingIdentitySignatureVersion ?: return null
+                val signedAtMillis = messagingIdentitySignedAtMillis ?: return null
+
+                return MessagingIdentityBindingPayloadV4(
+                    walletPubkey = pubkey,
+                    lightningAddressHash = hash,
+                    lightningAddressHashScheme = scheme,
+                    messagingPubkey = messagePubkey,
+                    messagingIdentitySignature = signature,
+                    messagingIdentitySignatureVersion = signatureVersion,
+                    messagingIdentitySignedAtSeconds = signedAtMillis / 1000L
+                )
+            }
     }
 
     private fun String.toRegistrationResponse(): RegistrationResponse {
         val json = JSONObject(this)
+        val bindingJson = json.optJSONObject("binding")
         return RegistrationResponse(
             ok = json.optBoolean("ok", false),
             walletPubkey = json.optString("walletPubkey").ifBlank { null },
             lightningAddress = json.optString("lightningAddress").ifBlank { null },
+            messagingAccountId = json.optString("messagingAccountId").ifBlank { null },
+            lightningAddressHash = json.optString("lightningAddressHash").ifBlank { null },
+            lightningAddressHashScheme = json.optString("lightningAddressHashScheme").ifBlank { null },
             didUpdate = json.optBoolean("didUpdate", false),
             didRotate = json.optBoolean("didRotate", false),
+            binding = bindingJson?.toMessagingIdentityBindingPayloadV4(),
             messagingPubkey = json.optString("messagingPubkey").ifBlank { null },
             messagingIdentitySignature = json.optString("messagingIdentitySignature").ifBlank { null },
             messagingIdentitySignatureVersion = json.optInt("messagingIdentitySignatureVersion").takeIf { it != 0 },
             messagingIdentitySignedAtMillis = isoStringToMillis(json.optString("messagingIdentitySignedAt").ifBlank { null }),
             messagingIdentityUpdatedAtMillis = isoStringToMillis(json.optString("messagingIdentityUpdatedAt").ifBlank { null }),
-            directory = json.optJSONObject("directory")?.toDirectoryProofPayload(),
+            directory = json.optJSONObject("directory")?.toMessagingRegistrationDirectoryV4(),
             error = json.optString("error").ifBlank { null }
+        )
+    }
+
+    private fun JSONObject.toMessagingIdentityBindingPayloadV4(): MessagingIdentityBindingPayloadV4 {
+        return MessagingIdentityBindingPayloadV4(
+            walletPubkey = getString("walletPubkey"),
+            lightningAddressHash = getString("lightningAddressHash"),
+            lightningAddressHashScheme = getString("lightningAddressHashScheme"),
+            messagingPubkey = getString("messagingPubkey"),
+            messagingIdentitySignature = getString("messagingIdentitySignature"),
+            messagingIdentitySignatureVersion = getInt("messagingIdentitySignatureVersion"),
+            messagingIdentitySignedAtSeconds = getLong("messagingIdentitySignedAt")
+        )
+    }
+
+    private fun JSONObject.toMessagingRegistrationDirectoryV4(): MessagingRegistrationDirectoryV4 {
+        return MessagingRegistrationDirectoryV4(
+            mode = optString("mode").ifBlank { null },
+            proof = optString("proof").ifBlank { null },
+            issuedAtMillis = isoStringToMillis(optString("issuedAt").ifBlank { null })
         )
     }
 
@@ -829,11 +994,18 @@ class MessageKeyManager(
         )
     }
 
+    data class MessagingRegistrationDirectoryV4(
+        val mode: String?,
+        val proof: String?,
+        val issuedAtMillis: Long?
+    )
+
     private companion object {
         const val FILE_NAME = "split_secure_messaging_keys"
         const val KEY_MESSAGING_PRIVATE_KEY = "messaging_private_key"
         const val KEY_MESSAGING_SIGNING_PRIVATE_KEY = "messaging_signing_private_key"
         const val KEY_MESSAGING_SIGNING_CERTIFICATE = "messaging_signing_certificate"
+        const val KEY_MESSAGING_SIGNING_CERTIFICATE_V4 = "messaging_v4_signing_certificate"
         const val KEY_DIRECTORY_ROOT_HASH = "messaging_directory_root_hash"
         const val KEY_DIRECTORY_TREE_SIZE = "messaging_directory_tree_size"
         const val KEY_DIRECTORY_ISSUED_AT_MILLIS = "messaging_directory_issued_at_millis"

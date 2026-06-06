@@ -145,7 +145,7 @@ class SplitRootViewModel(
     private val merchantReportRepository = MerchantReportRepository(httpClient)
     private val merchantCouponsRepository = MerchantCouponsRepository(httpClient)
     private val bitcoinEventsRepository = BitcoinEventsRepository(httpClient)
-    private val messagingBlockRepository = MessagingBlockRepository(httpClient)
+    private val messagingBlockRepository = MessagingBlockRepository(application, httpClient)
     private val sparkWalletClient = BreezSparkWalletClient()
     private val sparkSubwalletWalletClient = BreezSparkWalletClient()
     private val mnemonicGenerator = MnemonicGenerator(application)
@@ -536,20 +536,46 @@ class SplitRootViewModel(
         walletManager.cancelPendingWalletCreation()
     }
 
+    fun readSavedRecoveryPhrase(): String? {
+        return seedStore.readSeed()
+    }
+
     fun clearWallet() {
         launchGuarded("clearWallet") {
-            walletManager.removeWalletFromDevice()
-            lndWalletManager.disconnectFromActiveNode()
-            nwcWalletManager.disconnectFromActiveWallet()
-            coreLightningWalletManager.disconnectFromActiveNode()
-            eclairWalletManager.disconnectFromActiveNode()
-            sparkSubwalletManager.disconnectActiveWallet()
-            messagingRepository.clearAll()
-            authManager.invalidateSession()
-            _contactsByPaymentIdentifier.value = emptyMap()
-            MessageSyncScheduler.cancel(getApplication())
-            MessagingDeviceTokenSyncScheduler.cancel(getApplication())
+            clearLocalWalletAndAccountState()
         }
+    }
+
+    suspend fun deleteRewardsAccount() {
+        authManager.ensureSession(walletManager)
+
+        var response = httpClient.postJson("/v1/account/delete", "{}")
+        if (response.statusCode == 401 || response.statusCode == 403) {
+            authManager.invalidateSession()
+            authManager.ensureSession(walletManager)
+            response = httpClient.postJson("/v1/account/delete", "{}")
+        }
+
+        if (response.statusCode !in 200..299) {
+            throw IllegalStateException("Failed to delete rewards account (${response.statusCode}).")
+        }
+
+        clearLocalWalletAndAccountState()
+    }
+
+    private suspend fun clearLocalWalletAndAccountState() {
+        walletManager.removeWalletFromDevice()
+        lndWalletManager.disconnectFromActiveNode()
+        nwcWalletManager.disconnectFromActiveWallet()
+        coreLightningWalletManager.disconnectFromActiveNode()
+        eclairWalletManager.disconnectFromActiveNode()
+        sparkSubwalletManager.disconnectActiveWallet()
+        messagingRepository.clearAll()
+        messagingDeviceTokenManager.clearCachedDeviceTokenState()
+        authManager.invalidateSession()
+        _contactsByPaymentIdentifier.value = emptyMap()
+        MessageSyncScheduler.cancel(getApplication())
+        MessagingDeviceTokenSyncScheduler.cancel(getApplication())
     }
 
     fun loadContacts() {

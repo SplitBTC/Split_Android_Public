@@ -24,6 +24,7 @@ import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.ColumnScope
+import androidx.compose.foundation.layout.FlowRow
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxSize
@@ -71,6 +72,7 @@ import androidx.compose.material3.Text
 import androidx.compose.material3.TextField
 import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
@@ -102,8 +104,13 @@ import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.viewinterop.AndroidView
 import androidx.compose.ui.window.Dialog
+import androidx.compose.ui.window.DialogProperties
+import androidx.compose.ui.window.SecureFlagPolicy
 import androidx.core.content.ContextCompat
+import androidx.lifecycle.DefaultLifecycleObserver
+import androidx.lifecycle.LifecycleOwner
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
+import androidx.lifecycle.compose.LocalLifecycleOwner
 import coil.compose.AsyncImage
 import com.split.android.core.AppConfig
 import com.split.android.data.wallet.CoreLightningNodeCredentials
@@ -239,7 +246,13 @@ fun ProfileScreen(
         }
 
         ProfileRoute.ADD_LIGHTNING_WALLET -> AddLightningWalletScreen(
-            onBack = { route = ProfileRoute.LIGHTNING_CONNECTIONS },
+            onBack = {
+                route = if (rootViewModel.storedLightningWallets().isEmpty()) {
+                    ProfileRoute.HOME
+                } else {
+                    ProfileRoute.LIGHTNING_CONNECTIONS
+                }
+            },
             onSelectRoute = { route = it }
         )
 
@@ -338,6 +351,12 @@ private fun ProfileHomeScreen(
     val hasConnectedEclairNode = connectedEclairNode != null || rootViewModel.hasStoredEclairNode()
     val connectedSparkSubwallet by rootViewModel.connectedSparkSubwallet.collectAsStateWithLifecycle()
     val hasConnectedSparkSubwallet = connectedSparkSubwallet != null || rootViewModel.hasStoredSparkSubwallet()
+    val hasConnectedLightningWallet =
+        hasConnectedLightningNode ||
+            hasConnectedNwcWallet ||
+            hasConnectedCoreLightningNode ||
+            hasConnectedEclairNode ||
+            hasConnectedSparkSubwallet
     val entries = listOf(
         ProfileEntry(
             Icons.Rounded.Bolt,
@@ -349,7 +368,11 @@ private fun ProfileHomeScreen(
                 hasConnectedEclairNode = hasConnectedEclairNode,
                 hasConnectedSparkSubwallet = hasConnectedSparkSubwallet
             ),
-            ProfileRoute.LIGHTNING_CONNECTIONS
+            if (hasConnectedLightningWallet) {
+                ProfileRoute.LIGHTNING_CONNECTIONS
+            } else {
+                ProfileRoute.ADD_LIGHTNING_WALLET
+            }
         ),
         ProfileEntry(
             SplitFeatureIcons.Store,
@@ -4129,7 +4152,7 @@ private fun SupportScreen(
                     onOpenSupportChat(
                         SupportChatRequest.OpenThread(
                             conversationId = existing.id,
-                            title = "Support",
+                            title = "Taylor",
                             lightningAddress = supportLightningAddress
                         )
                     )
@@ -4141,7 +4164,7 @@ private fun SupportScreen(
             },
             modifier = Modifier.fillMaxWidth()
         ) {
-            Text(if (existingSupportThread == null) "Message Support" else "Open Support Chat")
+            Text(if (existingSupportThread == null) "Message Taylor" else "Open Support Chat")
         }
     }
 }
@@ -4249,39 +4272,315 @@ private fun WalletManagementScreen(
     val context = LocalContext.current
     val scope = rememberCoroutineScope()
     var confirmRemove by remember { mutableStateOf(false) }
+    var confirmDeleteAccount by remember { mutableStateOf(false) }
     var isRemoving by remember { mutableStateOf(false) }
+    var isDeletingAccount by remember { mutableStateOf(false) }
     var removalError by remember { mutableStateOf<String?>(null) }
+    var deleteAccountError by remember { mutableStateOf<String?>(null) }
+    var isRevealingSeed by remember { mutableStateOf(false) }
+    var revealError by remember { mutableStateOf<String?>(null) }
+    var revealedSeedWords by remember { mutableStateOf<List<String>>(emptyList()) }
 
     ScrollSubscreen(
-        title = "Wallet Management",
-        subtitle = "Wallet device access.",
+        title = "Account Management",
+        subtitle = "Wallet-backed identity.",
         onBack = onBack
     ) {
-        InfoCard(
-            title = "Remove Wallet",
-            paragraphs = listOf(
-                "This removes the wallet from this device. You will need your recovery phrase to restore it later."
-            )
-        )
-
-        OutlinedButton(
-            onClick = {
-                removalError = null
-                confirmRemove = true
-            },
-            modifier = Modifier.fillMaxWidth(),
-            enabled = !isRemoving
-        ) {
-            Text("Remove Wallet From Device")
-        }
-
-        if (!removalError.isNullOrBlank()) {
+        Column(verticalArrangement = Arrangement.spacedBy(10.dp)) {
             Text(
-                text = removalError ?: "",
-                style = MaterialTheme.typography.bodySmall,
-                color = SplitBrandPink
+                text = "Your Split Account",
+                style = MaterialTheme.typography.headlineSmall,
+                color = Color.White,
+                fontWeight = FontWeight.Black
+            )
+            Text(
+                text = "Your wallet is your Split account. Keep your recovery phrase saved somewhere private and durable. Split cannot recover your account, wallet, or funds if your device is lost and you do not have that phrase.",
+                style = MaterialTheme.typography.bodyMedium,
+                color = Color.White.copy(alpha = 0.72f)
             )
         }
+
+        Column(verticalArrangement = Arrangement.spacedBy(10.dp)) {
+            WalletManagementSectionTitle("Account Security")
+            Surface(
+                modifier = Modifier.fillMaxWidth(),
+                shape = RoundedCornerShape(18.dp),
+                color = Color(0xFF111217),
+                border = BorderStroke(1.dp, Color.White.copy(alpha = 0.08f))
+            ) {
+                Column {
+                    WalletManagementInfoRow(
+                        icon = Icons.Rounded.Lock,
+                        iconTint = SplitBrandBlue,
+                        title = "Self-custodial wallet",
+                        subtitle = "The recovery phrase controls access to this Split account."
+                    )
+                    Box(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .height(1.dp)
+                            .background(Color.White.copy(alpha = 0.06f))
+                    )
+                    WalletManagementInfoRow(
+                        icon = Icons.Rounded.Info,
+                        iconTint = SplitBrandPink,
+                        title = "No server recovery",
+                        subtitle = "Split does not store your recovery phrase or private keys."
+                    )
+                }
+            }
+        }
+
+        Column(verticalArrangement = Arrangement.spacedBy(10.dp)) {
+            WalletManagementSectionTitle("Recovery Phrase")
+            Surface(
+                modifier = Modifier.fillMaxWidth(),
+                shape = RoundedCornerShape(18.dp),
+                color = Color(0xFF111217),
+                border = BorderStroke(1.dp, Color.White.copy(alpha = 0.08f))
+            ) {
+                Column(
+                    modifier = Modifier.padding(16.dp),
+                    verticalArrangement = Arrangement.spacedBy(14.dp)
+                ) {
+                    Text(
+                        text = "Use this only when you need to back up or restore your wallet. Never share these words with anyone, including Split support.",
+                        style = MaterialTheme.typography.bodyMedium,
+                        color = Color.White.copy(alpha = 0.70f)
+                    )
+
+                    Button(
+                        onClick = {
+                            val activity = context.findActivity()
+                            if (activity == null) {
+                                revealError = "Biometric authentication is not available on this device."
+                                return@Button
+                            }
+
+                            scope.launch {
+                                isRevealingSeed = true
+                                revealError = null
+
+                                runCatching {
+                                    val confirmed = confirmRecoveryPhraseRevealWithBiometrics(activity)
+                                    if (!confirmed) {
+                                        null
+                                    } else {
+                                        rootViewModel.readSavedRecoveryPhrase()
+                                            ?.split(Regex("\\s+"))
+                                            ?.map { it.trim() }
+                                            ?.filter { it.isNotEmpty() }
+                                            .orEmpty()
+                                    }
+                                }.onSuccess { words ->
+                                    if (words == null) {
+                                        return@onSuccess
+                                    }
+
+                                    if (words.size >= 12) {
+                                        revealedSeedWords = words
+                                    } else {
+                                        revealError = "No recovery phrase is saved on this device."
+                                    }
+                                }.onFailure { error ->
+                                    revealError = error.message
+                                        ?: "Could not confirm with device biometrics."
+                                }
+
+                                isRevealingSeed = false
+                            }
+                        },
+                        modifier = Modifier.fillMaxWidth(),
+                        enabled = !isRevealingSeed,
+                        colors = ButtonDefaults.buttonColors(
+                            containerColor = SplitBrandPink,
+                            contentColor = Color.White
+                        )
+                    ) {
+                        Row(
+                            modifier = Modifier.fillMaxWidth(),
+                            verticalAlignment = Alignment.CenterVertically,
+                            horizontalArrangement = Arrangement.spacedBy(12.dp)
+                        ) {
+                            if (isRevealingSeed) {
+                                CircularProgressIndicator(
+                                    modifier = Modifier.size(20.dp),
+                                    color = Color.White,
+                                    strokeWidth = 2.dp
+                                )
+                            } else {
+                                Icon(
+                                    imageVector = Icons.Rounded.Lock,
+                                    contentDescription = null
+                                )
+                            }
+
+                            Column(modifier = Modifier.weight(1f)) {
+                                Text(
+                                    text = if (isRevealingSeed) "Checking Identity" else "Reveal Recovery Phrase",
+                                    style = MaterialTheme.typography.bodyLarge,
+                                    fontWeight = FontWeight.Bold
+                                )
+                                Text(
+                                    text = "Requires biometric authentication",
+                                    style = MaterialTheme.typography.bodySmall,
+                                    color = Color.White.copy(alpha = 0.68f)
+                                )
+                            }
+
+                            Icon(
+                                imageVector = Icons.Rounded.ChevronRight,
+                                contentDescription = null,
+                                tint = Color.White.copy(alpha = 0.70f)
+                            )
+                        }
+                    }
+
+                    if (!revealError.isNullOrBlank()) {
+                        Text(
+                            text = revealError ?: "",
+                            style = MaterialTheme.typography.bodySmall,
+                            color = SplitBrandPink,
+                            fontWeight = FontWeight.SemiBold
+                        )
+                    }
+                }
+            }
+        }
+
+        Column(verticalArrangement = Arrangement.spacedBy(10.dp)) {
+            WalletManagementSectionTitle("Device Access")
+            Surface(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .clickable(
+                        enabled = !isRemoving,
+                        onClick = {
+                            removalError = null
+                            confirmRemove = true
+                        }
+                    ),
+                shape = RoundedCornerShape(18.dp),
+                color = Color(0xFF101013),
+                border = BorderStroke(1.dp, Color.Red.copy(alpha = 0.24f))
+            ) {
+                Row(
+                    modifier = Modifier.padding(16.dp),
+                    verticalAlignment = Alignment.CenterVertically,
+                    horizontalArrangement = Arrangement.spacedBy(12.dp)
+                ) {
+                    Box(
+                        modifier = Modifier
+                            .size(38.dp)
+                            .clip(CircleShape)
+                            .background(Color.Red.copy(alpha = 0.82f)),
+                        contentAlignment = Alignment.Center
+                    ) {
+                        Icon(
+                            imageVector = Icons.Rounded.Delete,
+                            contentDescription = null,
+                            tint = Color.White,
+                            modifier = Modifier.size(20.dp)
+                        )
+                    }
+                    Column(modifier = Modifier.weight(1f)) {
+                        Text(
+                            text = "Remove Wallet From This Device",
+                            style = MaterialTheme.typography.bodyLarge,
+                            color = Color.White,
+                            fontWeight = FontWeight.Bold
+                        )
+                        Text(
+                            text = "You will need your recovery phrase to restore access.",
+                            style = MaterialTheme.typography.bodySmall,
+                            color = Color.White.copy(alpha = 0.62f)
+                        )
+                    }
+                    Icon(
+                        imageVector = Icons.Rounded.ChevronRight,
+                        contentDescription = null,
+                        tint = Color.White.copy(alpha = 0.48f)
+                    )
+                }
+            }
+
+            Surface(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .clickable(
+                        enabled = !isDeletingAccount,
+                        onClick = {
+                            deleteAccountError = null
+                            confirmDeleteAccount = true
+                        }
+                    ),
+                shape = RoundedCornerShape(18.dp),
+                color = Color(0xFF101013),
+                border = BorderStroke(1.dp, Color.Red.copy(alpha = 0.30f))
+            ) {
+                Row(
+                    modifier = Modifier.padding(16.dp),
+                    verticalAlignment = Alignment.CenterVertically,
+                    horizontalArrangement = Arrangement.spacedBy(12.dp)
+                ) {
+                    Box(
+                        modifier = Modifier
+                            .size(38.dp)
+                            .clip(CircleShape)
+                            .background(Color.Red.copy(alpha = 0.90f)),
+                        contentAlignment = Alignment.Center
+                    ) {
+                        Icon(
+                            imageVector = Icons.Rounded.Delete,
+                            contentDescription = null,
+                            tint = Color.White,
+                            modifier = Modifier.size(20.dp)
+                        )
+                    }
+                    Column(modifier = Modifier.weight(1f)) {
+                        Text(
+                            text = "Delete Rewards Account",
+                            style = MaterialTheme.typography.bodyLarge,
+                            color = Color.White,
+                            fontWeight = FontWeight.Bold
+                        )
+                        Text(
+                            text = "This will delete your rewards account. This data cannot be restored.",
+                            style = MaterialTheme.typography.bodySmall,
+                            color = Color.White.copy(alpha = 0.62f)
+                        )
+                    }
+                    Icon(
+                        imageVector = Icons.Rounded.ChevronRight,
+                        contentDescription = null,
+                        tint = Color.White.copy(alpha = 0.48f)
+                    )
+                }
+            }
+
+            if (!removalError.isNullOrBlank()) {
+                Text(
+                    text = removalError ?: "",
+                    style = MaterialTheme.typography.bodySmall,
+                    color = SplitBrandPink
+                )
+            }
+
+            if (!deleteAccountError.isNullOrBlank()) {
+                Text(
+                    text = deleteAccountError ?: "",
+                    style = MaterialTheme.typography.bodySmall,
+                    color = SplitBrandPink
+                )
+            }
+        }
+    }
+
+    if (revealedSeedWords.isNotEmpty()) {
+        RecoveryPhraseReviewDialog(
+            words = revealedSeedWords,
+            onDismiss = { revealedSeedWords = emptyList() }
+        )
     }
 
     if (confirmRemove) {
@@ -4350,6 +4649,259 @@ private fun WalletManagementScreen(
             }
         )
     }
+
+    if (confirmDeleteAccount) {
+        AlertDialog(
+            onDismissRequest = {
+                if (!isDeletingAccount) {
+                    confirmDeleteAccount = false
+                }
+            },
+            confirmButton = {
+                Button(
+                    onClick = {
+                        val activity = context.findActivity()
+                        if (activity == null) {
+                            deleteAccountError = "Biometric authentication is not available on this device."
+                            confirmDeleteAccount = false
+                            return@Button
+                        }
+
+                        scope.launch {
+                            isDeletingAccount = true
+                            deleteAccountError = null
+
+                            runCatching {
+                                val confirmed = confirmWalletRemovalWithBiometrics(activity)
+                                if (confirmed) {
+                                    rootViewModel.deleteRewardsAccount()
+                                }
+                            }.onSuccess {
+                                confirmDeleteAccount = false
+                            }.onFailure { error ->
+                                deleteAccountError = error.message
+                                    ?: "Could not delete your rewards account right now."
+                                confirmDeleteAccount = false
+                            }
+
+                            isDeletingAccount = false
+                        }
+                    },
+                    enabled = !isDeletingAccount,
+                    colors = ButtonDefaults.buttonColors(
+                        containerColor = Color.Red,
+                        contentColor = Color.White
+                    )
+                ) {
+                    if (isDeletingAccount) {
+                        CircularProgressIndicator(
+                            modifier = Modifier.size(18.dp),
+                            color = Color.White,
+                            strokeWidth = 2.dp
+                        )
+                    } else {
+                        Text("Delete")
+                    }
+                }
+            },
+            dismissButton = {
+                OutlinedButton(
+                    onClick = { confirmDeleteAccount = false },
+                    enabled = !isDeletingAccount
+                ) {
+                    Text("Cancel")
+                }
+            },
+            title = { Text("Delete Rewards Account?") },
+            text = {
+                Text(
+                    "This will delete your rewards account. This data cannot be restored. Authenticate with your device biometrics to continue."
+                )
+            }
+        )
+    }
+}
+
+@Composable
+private fun WalletManagementSectionTitle(title: String) {
+    Text(
+        text = title.uppercase(Locale.US),
+        style = MaterialTheme.typography.labelSmall,
+        color = Color.White.copy(alpha = 0.52f),
+        fontWeight = FontWeight.Black
+    )
+}
+
+@Composable
+private fun WalletManagementInfoRow(
+    icon: ImageVector,
+    iconTint: Color,
+    title: String,
+    subtitle: String
+) {
+    Row(
+        modifier = Modifier
+            .fillMaxWidth()
+            .padding(16.dp),
+        verticalAlignment = Alignment.Top,
+        horizontalArrangement = Arrangement.spacedBy(12.dp)
+    ) {
+        Box(
+            modifier = Modifier
+                .size(36.dp)
+                .clip(CircleShape)
+                .background(iconTint.copy(alpha = 0.88f)),
+            contentAlignment = Alignment.Center
+        ) {
+            Icon(
+                imageVector = icon,
+                contentDescription = null,
+                tint = Color.White,
+                modifier = Modifier.size(19.dp)
+            )
+        }
+        Column(
+            modifier = Modifier.weight(1f),
+            verticalArrangement = Arrangement.spacedBy(4.dp)
+        ) {
+            Text(
+                text = title,
+                style = MaterialTheme.typography.bodyMedium,
+                color = Color.White,
+                fontWeight = FontWeight.Bold
+            )
+            Text(
+                text = subtitle,
+                style = MaterialTheme.typography.bodySmall,
+                color = Color.White.copy(alpha = 0.64f)
+            )
+        }
+    }
+}
+
+@Composable
+private fun RecoveryPhraseReviewDialog(
+    words: List<String>,
+    onDismiss: () -> Unit
+) {
+    val lifecycleOwner = LocalLifecycleOwner.current
+
+    BackHandler(onBack = onDismiss)
+
+    DisposableEffect(lifecycleOwner) {
+        val observer = object : DefaultLifecycleObserver {
+            override fun onStop(owner: LifecycleOwner) {
+                onDismiss()
+            }
+        }
+
+        lifecycleOwner.lifecycle.addObserver(observer)
+
+        onDispose {
+            lifecycleOwner.lifecycle.removeObserver(observer)
+        }
+    }
+
+    Dialog(
+        onDismissRequest = onDismiss,
+        properties = DialogProperties(
+            usePlatformDefaultWidth = false,
+            securePolicy = SecureFlagPolicy.SecureOn
+        )
+    ) {
+        Column(
+            modifier = Modifier
+                .fillMaxSize()
+                .background(SplitBlack)
+                .statusBarsPadding()
+                .verticalScroll(rememberScrollState())
+                .padding(horizontal = 18.dp, vertical = 18.dp),
+            verticalArrangement = Arrangement.spacedBy(18.dp)
+        ) {
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                verticalAlignment = Alignment.CenterVertically,
+                horizontalArrangement = Arrangement.SpaceBetween
+            ) {
+                Text(
+                    text = "Recovery Phrase",
+                    style = MaterialTheme.typography.headlineSmall,
+                    color = Color.White,
+                    fontWeight = FontWeight.Black
+                )
+
+                TextButton(onClick = onDismiss) {
+                    Text("Done", color = Color.White)
+                }
+            }
+
+            Text(
+                text = "Write these words down exactly, in order. Anyone with this phrase can access your wallet and Split account.",
+                style = MaterialTheme.typography.bodyMedium,
+                color = Color.White.copy(alpha = 0.70f)
+            )
+
+            Surface(
+                modifier = Modifier.fillMaxWidth(),
+                shape = RoundedCornerShape(16.dp),
+                color = SplitBrandPink.copy(alpha = 0.18f),
+                border = BorderStroke(1.dp, SplitBrandPink.copy(alpha = 0.42f))
+            ) {
+                Text(
+                    text = "Screenshots and screen recordings are blocked on this screen. Store the phrase somewhere private and offline, or in a trusted password manager.",
+                    modifier = Modifier.padding(14.dp),
+                    style = MaterialTheme.typography.bodyMedium,
+                    color = Color.White,
+                    fontWeight = FontWeight.SemiBold
+                )
+            }
+
+            Surface(
+                modifier = Modifier.fillMaxWidth(),
+                shape = RoundedCornerShape(16.dp),
+                color = Color(0xFF0F1014),
+                border = BorderStroke(1.dp, Color.White.copy(alpha = 0.08f))
+            ) {
+                FlowRow(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .padding(12.dp),
+                    horizontalArrangement = Arrangement.spacedBy(8.dp),
+                    verticalArrangement = Arrangement.spacedBy(8.dp),
+                    maxItemsInEachRow = 2
+                ) {
+                    words.forEachIndexed { index, word ->
+                        Surface(
+                            modifier = Modifier.fillMaxWidth(0.48f),
+                            shape = RoundedCornerShape(10.dp),
+                            color = Color(0xFF16171D)
+                        ) {
+                            Row(
+                                modifier = Modifier.padding(horizontal = 12.dp, vertical = 10.dp),
+                                horizontalArrangement = Arrangement.spacedBy(8.dp),
+                                verticalAlignment = Alignment.CenterVertically
+                            ) {
+                                Text(
+                                    text = "${index + 1}.",
+                                    style = MaterialTheme.typography.bodySmall,
+                                    color = Color.White.copy(alpha = 0.55f),
+                                    fontWeight = FontWeight.SemiBold
+                                )
+                                Text(
+                                    text = word,
+                                    style = MaterialTheme.typography.bodyMedium,
+                                    color = Color.White,
+                                    fontWeight = FontWeight.SemiBold,
+                                    maxLines = 1,
+                                    overflow = TextOverflow.Ellipsis
+                                )
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
 }
 
 @Composable
@@ -4384,6 +4936,81 @@ private tailrec fun Context.findActivity(): Activity? {
         is ContextWrapper -> baseContext.findActivity()
         else -> null
     }
+}
+
+@Suppress("DEPRECATION")
+private suspend fun confirmRecoveryPhraseRevealWithBiometrics(
+    activity: Activity
+): Boolean = suspendCancellableCoroutine { continuation ->
+    val biometricManager = activity.getSystemService(BiometricManager::class.java)
+    if (biometricManager == null ||
+        biometricManager.canAuthenticate() != BiometricManager.BIOMETRIC_SUCCESS
+    ) {
+        continuation.resumeWithException(
+            IllegalStateException("Biometric authentication is not available on this device.")
+        )
+        return@suspendCancellableCoroutine
+    }
+
+    val executor = ContextCompat.getMainExecutor(activity)
+    val cancellationSignal = CancellationSignal()
+
+    continuation.invokeOnCancellation {
+        cancellationSignal.cancel()
+    }
+
+    val prompt = BiometricPrompt.Builder(activity)
+        .setTitle("Reveal Recovery Phrase")
+        .setSubtitle("Confirm your identity")
+        .setNegativeButton(
+            "Cancel",
+            executor
+        ) { _, _ ->
+            if (continuation.isActive) {
+                continuation.resume(false)
+            }
+        }
+        .build()
+
+    prompt.authenticate(
+        cancellationSignal,
+        executor,
+        object : BiometricPrompt.AuthenticationCallback() {
+            override fun onAuthenticationSucceeded(result: BiometricPrompt.AuthenticationResult?) {
+                if (continuation.isActive) {
+                    continuation.resume(true)
+                }
+            }
+
+            override fun onAuthenticationError(
+                errorCode: Int,
+                errString: CharSequence?
+            ) {
+                if (!continuation.isActive) return
+
+                if (errorCode == BiometricPrompt.BIOMETRIC_ERROR_USER_CANCELED ||
+                    errorCode == BiometricPrompt.BIOMETRIC_ERROR_CANCELED
+                ) {
+                    continuation.resume(false)
+                } else {
+                    continuation.resumeWithException(
+                        IllegalStateException(
+                            errString?.toString()
+                                ?: "Could not confirm with device biometrics."
+                        )
+                    )
+                }
+            }
+
+            override fun onAuthenticationFailed() {
+                if (continuation.isActive) {
+                    continuation.resumeWithException(
+                        IllegalStateException("Could not confirm with device biometrics.")
+                    )
+                }
+            }
+        }
+    )
 }
 
 @Suppress("DEPRECATION")

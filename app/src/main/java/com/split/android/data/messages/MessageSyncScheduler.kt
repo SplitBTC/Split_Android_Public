@@ -170,12 +170,17 @@ class MessagingDeviceTokenSyncWorker(
 
                 authManager.ensureSession(walletManager)
                 if (tokenOverride.isNullOrBlank()) {
-                    deviceTokenManager.syncCurrentDeviceToken(authManager, walletManager)
+                    deviceTokenManager.syncCurrentDeviceToken(
+                        authManager = authManager,
+                        walletManager = walletManager,
+                        force = true
+                    )
                 } else {
                     deviceTokenManager.syncProvidedDeviceToken(
                         token = tokenOverride,
                         authManager = authManager,
-                        walletManager = walletManager
+                        walletManager = walletManager,
+                        force = true
                     )
                 }
                 Result.success()

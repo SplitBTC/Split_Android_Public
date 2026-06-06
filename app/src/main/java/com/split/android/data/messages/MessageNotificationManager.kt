@@ -26,6 +26,10 @@ object MessageNotificationManager {
     private const val CHANNEL_DESCRIPTION = "Notifications for new Split messages"
     private val fallbackVibrationPattern = longArrayOf(0L, 250L, 150L, 250L)
 
+    fun ensureMessageChannel(context: Context) {
+        getOrCreateChannel(context)
+    }
+
     fun showNewMessageNotification(
         context: Context,
         conversationId: String,

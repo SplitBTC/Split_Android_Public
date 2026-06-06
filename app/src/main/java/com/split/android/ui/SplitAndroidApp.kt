@@ -83,7 +83,9 @@ import androidx.lifecycle.DefaultLifecycleObserver
 import androidx.lifecycle.LifecycleOwner
 import androidx.lifecycle.viewmodel.compose.viewModel
 import com.split.android.data.auth.AuthState
+import com.split.android.data.messages.MessageNotificationManager
 import com.split.android.data.messages.MessageNotificationRouter
+import com.split.android.data.messages.MessagePushEvents
 import com.split.android.data.messages.MessageThreadPresenceTracker
 import com.split.android.data.wallet.TransactionActivityTracker
 import com.split.android.data.wallet.RemoteNodeTorTransport
@@ -1212,6 +1214,12 @@ private fun MainWalletShell(
         rootViewModel.setNwcNotificationListenerActive(isAppActive)
     }
 
+    LaunchedEffect(Unit) {
+        MessagePushEvents.incomingMessagePushes.collect {
+            rootViewModel.syncMessages(force = true)
+        }
+    }
+
     LaunchedEffect(
         isAppActive,
         activeSpendWallet,
@@ -1254,6 +1262,7 @@ private fun MainWalletShell(
     }
 
     LaunchedEffect(Unit) {
+        MessageNotificationManager.ensureMessageChannel(context)
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU &&
             ContextCompat.checkSelfPermission(
                 context,

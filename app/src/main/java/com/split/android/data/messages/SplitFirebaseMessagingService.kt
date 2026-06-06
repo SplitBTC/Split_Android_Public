@@ -23,22 +23,16 @@ class SplitFirebaseMessagingService : FirebaseMessagingService() {
 
         val pushType = data["type"]?.trim().orEmpty()
         if (pushType == "messaging.new_message") {
+            MessagePushEvents.notifyIncomingMessagePush()
             val conversationId = data["conversationId"]?.trim().orEmpty()
             if (conversationId.isNotEmpty()) {
-                val shouldSuppressNotification = MessageThreadPresenceTracker.shouldSuppressNotification(
-                    conversationId = conversationId
+                val unreadConversationCount = MessageStore.getInstance(applicationContext)
+                    .unreadConversationCount + 1
+                MessageNotificationManager.showNewMessageNotification(
+                    context = applicationContext,
+                    conversationId = conversationId,
+                    unreadConversationCount = unreadConversationCount
                 )
-                if (!shouldSuppressNotification) {
-                    val unreadConversationCount = MessageStore.getInstance(applicationContext)
-                        .unreadConversationCount + 1
-                    MessageNotificationManager.showNewMessageNotification(
-                        context = applicationContext,
-                        conversationId = conversationId,
-                        unreadConversationCount = unreadConversationCount
-                    )
-                } else {
-                    MessageNotificationManager.playInAppAlertIfEnabled(applicationContext)
-                }
             }
             MessageSyncScheduler.triggerImmediateSync(applicationContext)
             return

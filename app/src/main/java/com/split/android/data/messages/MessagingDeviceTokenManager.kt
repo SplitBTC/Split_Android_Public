@@ -33,7 +33,10 @@ class MessagingDeviceTokenManager(
             return false
         }
 
-        val token = currentFirebaseTokenOrNull() ?: return false
+        val token = currentFirebaseTokenOrNull()
+        if (token.isNullOrBlank()) {
+            return false
+        }
         return syncProvidedDeviceToken(token, authManager, walletManager, force)
     }
 
@@ -52,11 +55,13 @@ class MessagingDeviceTokenManager(
 
         return runCatching {
             val registration = messageKeyManager.ensureRegistered(authManager, walletManager)
-            val activeMessagingPubkey = registration.messagingPubkey
+            val activeMessagingPubkey = (registration.identityBindingPayloadV4?.messagingPubkey ?: registration.messagingPubkey)
                 ?.trim()
                 ?.lowercase()
                 ?.takeIf { it.isNotEmpty() }
-                ?: return false
+            if (activeMessagingPubkey == null) {
+                return false
+            }
 
             if (!force &&
                 syncedDeviceToken() == normalizedToken &&
@@ -68,8 +73,9 @@ class MessagingDeviceTokenManager(
 
             val walletPubkey = walletManager.currentWalletPubkey()
             val signedAtSeconds = System.currentTimeMillis() / 1000L
-            val canonicalMessage = MessageBindingVerifier.buildMessagingDeviceRegistrationMessage(
-                version = 1,
+            val signatureVersion = 2
+            val canonicalMessage = MessageBindingVerifier.buildMessagingDeviceRegistrationMessageV4(
+                version = signatureVersion,
                 walletPubkey = walletPubkey,
                 messagingPubkey = activeMessagingPubkey,
                 platform = "fcm",
@@ -91,14 +97,16 @@ class MessagingDeviceTokenManager(
                 .put("environment", AppConfig.messagingPushEnvironment)
                 .put("deviceToken", normalizedToken)
                 .put("registrationSignature", signedMessage.signature)
-                .put("registrationSignatureVersion", 1)
+                .put("registrationSignatureVersion", signatureVersion)
                 .put("registrationSignedAt", signedAtSeconds)
+                .put("appVersion", appContext.packageManager.getPackageInfo(appContext.packageName, 0).versionName)
+                .put("bundleId", appContext.packageName)
 
-            var response = httpClient.postJson("/messaging/v3/device-registrations", body.toString())
+            var response = httpClient.postJson("/messaging/v4/device-registrations", body.toString())
             if (response.statusCode == 401 || response.statusCode == 403) {
                 authManager.invalidateSession()
                 authManager.ensureSession(walletManager)
-                response = httpClient.postJson("/messaging/v3/device-registrations", body.toString())
+                response = httpClient.postJson("/messaging/v4/device-registrations", body.toString())
             }
 
             if (response.statusCode == 409) {
@@ -137,6 +145,15 @@ class MessagingDeviceTokenManager(
             description.contains("create a lightning address before activating messaging") ||
             description.contains("messaging is active on another device") ||
             description.contains("lightningaddress must exist before messaging can be activated")
+    }
+
+    fun clearCachedDeviceTokenState() {
+        preferences.edit()
+            .remove(KEY_CURRENT_DEVICE_TOKEN)
+            .remove(KEY_SYNCED_DEVICE_TOKEN)
+            .remove(KEY_SYNCED_MESSAGING_PUBKEY)
+            .remove(KEY_SYNCED_ENVIRONMENT)
+            .apply()
     }
 
     private fun isFirebaseConfigured(): Boolean {

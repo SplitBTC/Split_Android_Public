@@ -1,6 +1,7 @@
 package com.split.android.data.messages
 
 import org.json.JSONObject
+import java.security.MessageDigest
 import java.text.NumberFormat
 import java.time.Instant
 import java.time.ZoneId
@@ -9,9 +10,39 @@ import java.util.Locale
 
 const val DELIVERY_STATE_FAILED_SAME_KEY = "failed_same_key"
 
+object MessagingPrivacyV4 {
+    const val LIGHTNING_ADDRESS_CLIENT_HASH_SCHEME = "split-ln-address-sha256-v1"
+    private const val LIGHTNING_ADDRESS_CLIENT_HASH_PREFIX = "split:messaging-ln:v1:"
+
+    fun normalizeLightningAddress(value: String): String {
+        val normalized = value.trim().lowercase()
+        require(normalized.isNotEmpty() && normalized.contains("@")) {
+            "The Lightning address is invalid."
+        }
+        return normalized
+    }
+
+    fun lightningAddressClientHash(lightningAddress: String): String {
+        val normalized = normalizeLightningAddress(lightningAddress)
+        val digest = MessageDigest.getInstance("SHA-256")
+            .digest("$LIGHTNING_ADDRESS_CLIENT_HASH_PREFIX$normalized".toByteArray(Charsets.UTF_8))
+        return digest.joinToString("") { byte -> "%02x".format(byte) }
+    }
+}
+
 data class MessagingIdentityBindingPayload(
     val walletPubkey: String,
     val lightningAddress: String,
+    val messagingPubkey: String,
+    val messagingIdentitySignature: String,
+    val messagingIdentitySignatureVersion: Int,
+    val messagingIdentitySignedAtSeconds: Long
+)
+
+data class MessagingIdentityBindingPayloadV4(
+    val walletPubkey: String,
+    val lightningAddressHash: String,
+    val lightningAddressHashScheme: String,
     val messagingPubkey: String,
     val messagingIdentitySignature: String,
     val messagingIdentitySignatureVersion: Int,
@@ -39,6 +70,8 @@ data class MessagingDirectoryProofPayload(
 data class MessagingRecipient(
     val walletPubkey: String,
     val lightningAddress: String,
+    val lightningAddressHash: String? = null,
+    val lightningAddressHashScheme: String? = null,
     val messagingPubkey: String,
     val messagingIdentitySignature: String,
     val messagingIdentitySignatureVersion: Int,
@@ -54,11 +87,44 @@ data class MessagingRecipient(
             messagingIdentitySignatureVersion = messagingIdentitySignatureVersion,
             messagingIdentitySignedAtSeconds = messagingIdentitySignedAtMillis / 1000L
         )
+
+    val identityBindingPayloadV4: MessagingIdentityBindingPayloadV4?
+        get() {
+            val hash = lightningAddressHash
+                ?.trim()
+                ?.lowercase()
+                ?.takeIf { it.isNotEmpty() }
+                ?: return null
+            val scheme = lightningAddressHashScheme
+                ?.trim()
+                ?.takeIf { it.isNotEmpty() }
+                ?: return null
+            return MessagingIdentityBindingPayloadV4(
+                walletPubkey = walletPubkey,
+                lightningAddressHash = hash,
+                lightningAddressHashScheme = scheme,
+                messagingPubkey = messagingPubkey,
+                messagingIdentitySignature = messagingIdentitySignature,
+                messagingIdentitySignatureVersion = messagingIdentitySignatureVersion,
+                messagingIdentitySignedAtSeconds = messagingIdentitySignedAtMillis / 1000L
+            )
+        }
 }
 
 data class MessageSigningCertificate(
     val walletPubkey: String,
     val lightningAddress: String,
+    val messagingPubkey: String,
+    val messagingSigningPubkey: String,
+    val messagingSigningPubkeySignature: String,
+    val messagingSigningPubkeySignatureVersion: Int,
+    val messagingSigningPubkeySignedAt: Long
+)
+
+data class MessageSigningCertificateV4(
+    val walletPubkey: String,
+    val lightningAddressHash: String,
+    val lightningAddressHashScheme: String,
     val messagingPubkey: String,
     val messagingSigningPubkey: String,
     val messagingSigningPubkeySignature: String,
@@ -77,10 +143,23 @@ data class SealedSenderMessagePayload(
     val messageSignatureVersion: Int
 )
 
+data class SealedSenderMessagePayloadV4(
+    val body: String,
+    val sender: MessagingIdentityBindingPayloadV4,
+    val senderLightningAddress: String,
+    val messagingSigningPubkey: String,
+    val messagingSigningPubkeySignature: String,
+    val messagingSigningPubkeySignatureVersion: Int,
+    val messagingSigningPubkeySignedAt: Long,
+    val messageSignature: String,
+    val messageSignatureVersion: Int
+)
+
 data class InboxMessage(
     val messageId: String,
     val clientMessageId: String,
-    val senderWalletPubkey: String,
+    val senderMessagingAccountId: String?,
+    val senderWalletPubkey: String?,
     val senderMessagingPubkey: String,
     val senderLightningAddress: String?,
     val senderMessagingIdentitySignature: String?,
@@ -88,9 +167,10 @@ data class InboxMessage(
     val senderMessagingIdentitySignedAtMillis: Long?,
     val senderEnvelopeSignature: String?,
     val senderEnvelopeSignatureVersion: Int?,
-    val recipientWalletPubkey: String,
+    val recipientMessagingAccountId: String?,
+    val recipientWalletPubkey: String?,
     val recipientMessagingPubkey: String,
-    val recipientLightningAddress: String,
+    val recipientLightningAddress: String?,
     val messageType: String,
     val envelopeVersion: Int,
     val ciphertext: String?,
@@ -117,9 +197,13 @@ data class InboxMessage(
                 ?: return null
             val signatureVersion = senderMessagingIdentitySignatureVersion ?: return null
             val signedAtMillis = senderMessagingIdentitySignedAtMillis ?: return null
+            val walletPubkey = senderWalletPubkey
+                ?.trim()
+                ?.takeIf { it.isNotEmpty() }
+                ?: return null
 
             return MessagingIdentityBindingPayload(
-                walletPubkey = senderWalletPubkey,
+                walletPubkey = walletPubkey,
                 lightningAddress = normalizedLightningAddress,
                 messagingPubkey = senderMessagingPubkey,
                 messagingIdentitySignature = signature,
@@ -228,6 +312,7 @@ data class MessageRecipientMetadata(
 
 data class MessagingBlockedUser(
     val blockId: String,
+    val blockedMessagingAccountId: String?,
     val blockedUserId: String,
     val blockedWalletPubkey: String,
     val blockedLightningAddress: String?,

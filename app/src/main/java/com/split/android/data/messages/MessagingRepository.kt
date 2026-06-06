@@ -28,6 +28,14 @@ class MessagingRepository(
         val sameKeyRetryCount: Int? = null
     )
 
+    data class SenderMessagingBindingV4(
+        val binding: MessagingIdentityBindingPayloadV4,
+        val rawLightningAddress: String
+    ) {
+        val walletPubkey: String
+            get() = binding.walletPubkey
+    }
+
     private data class InboxRecoveryCandidate(
         val message: InboxMessage,
         val reason: InboxRecoveryFailureReason
@@ -80,14 +88,25 @@ class MessagingRepository(
             )
 
             runCatching {
-                messageKeyManager.ensureRegistered(authManager, walletManager)
+                val localRegistration = messageKeyManager.ensureRegistered(authManager, walletManager)
+                val localRecipientBindingV4 = localRegistration.identityBindingPayloadV4
+                    ?: throw IllegalStateException("Invalid messaging key registration response.")
+                deviceTokenManager?.syncCurrentDeviceToken(
+                    authManager = authManager,
+                    walletManager = walletManager
+                )
+                val localLightningAddress = messageKeyManager.fetchLocalLightningAddressForV4Send(walletManager)
                 val inboxMessages = fetchInboxMessages(authManager, walletManager)
                 if (inboxMessages.isNotEmpty()) {
                     val decryptedMessages = mutableListOf<StoredMessage>()
                     val recoveryCandidates = mutableListOf<InboxRecoveryCandidate>()
                     inboxMessages.forEach { inboxMessage ->
                         try {
-                            decryptInboxMessage(inboxMessage)?.let(decryptedMessages::add)
+                            decryptInboxMessage(
+                                inboxMessage = inboxMessage,
+                                localRecipientBindingV4 = localRecipientBindingV4,
+                                localLightningAddress = localLightningAddress
+                            )?.let(decryptedMessages::add)
                         } catch (error: RecoverableInboxMessageException) {
                             recoveryCandidates += InboxRecoveryCandidate(
                                 message = inboxMessage,
@@ -552,14 +571,17 @@ class MessagingRepository(
     ): MessagingRecipient {
         authManager.ensureSession(walletManager)
 
+        val normalizedLightningAddress = MessagingPrivacyV4.normalizeLightningAddress(lightningAddress)
+        val lightningAddressHash = MessagingPrivacyV4.lightningAddressClientHash(normalizedLightningAddress)
         val requestBody = JSONObject()
-            .put("lightningAddress", lightningAddress)
+            .put("lightningAddressHash", lightningAddressHash)
+            .put("lightningAddressHashScheme", MessagingPrivacyV4.LIGHTNING_ADDRESS_CLIENT_HASH_SCHEME)
 
-        var response = httpClient.postJson("/messaging/v3/directory/lookup", requestBody.toString())
+        var response = httpClient.postJson("/messaging/v4/directory/lookup", requestBody.toString())
         if (response.statusCode == 401 || response.statusCode == 403) {
             authManager.invalidateSession()
             authManager.ensureSession(walletManager)
-            response = httpClient.postJson("/messaging/v3/directory/lookup", requestBody.toString())
+            response = httpClient.postJson("/messaging/v4/directory/lookup", requestBody.toString())
         }
 
         if (response.statusCode !in 200..299) {
@@ -568,21 +590,25 @@ class MessagingRepository(
 
         val rootJson = JSONObject(response.body)
         val recipientJson = rootJson.getJSONObject("recipient")
-        val directoryJson = rootJson.getJSONObject("directory")
         val recipient = MessagingRecipient(
             walletPubkey = recipientJson.getString("walletPubkey"),
-            lightningAddress = recipientJson.getString("lightningAddress"),
+            lightningAddress = normalizedLightningAddress,
+            lightningAddressHash = recipientJson.getString("lightningAddressHash"),
+            lightningAddressHashScheme = recipientJson.getString("lightningAddressHashScheme"),
             messagingPubkey = recipientJson.getString("messagingPubkey"),
             messagingIdentitySignature = recipientJson.getString("messagingIdentitySignature"),
             messagingIdentitySignatureVersion = recipientJson.getInt("messagingIdentitySignatureVersion"),
-            messagingIdentitySignedAtMillis = isoStringToMillis(recipientJson.getString("messagingIdentitySignedAt"))
+            messagingIdentitySignedAtMillis = recipientJson.signedAtMillis("messagingIdentitySignedAt")
                 ?: throw IllegalStateException("Recipient messaging signature timestamp is missing."),
             profilePicUrl = recipientJson.optString("profilePicUrl").ifBlank { null }
         )
-        val directory = directoryJson.toDirectoryProofPayload()
-        MessageBindingVerifier.verifyRecipientBinding(recipient)
-        MessageDirectoryVerifier.verifyDirectoryProof(recipient.identityBindingPayload, directory)
-        messageKeyManager.storeDirectoryCheckpointIfNewer(directory.checkpoint)
+        require(recipient.lightningAddressHash == lightningAddressHash) {
+            "Recipient messaging identity hash did not match the requested Lightning address."
+        }
+        require(recipient.lightningAddressHashScheme == MessagingPrivacyV4.LIGHTNING_ADDRESS_CLIENT_HASH_SCHEME) {
+            "Recipient messaging identity hash scheme is invalid."
+        }
+        MessageBindingVerifier.verifyRecipientBindingV4(recipient)
         messageStore.upsertRecipientMetadata(
             listOf(
                 MessageRecipientMetadata(
@@ -598,10 +624,16 @@ class MessagingRepository(
     private suspend fun ensureMessagingBinding(
         authManager: AuthManager,
         walletManager: WalletManager
-    ): MessagingIdentityBindingPayload {
+    ): SenderMessagingBindingV4 {
         val registration = messageKeyManager.ensureRegistered(authManager, walletManager)
-        return registration.identityBindingPayload
+        val binding = registration.identityBindingPayloadV4
             ?: throw IllegalStateException("Invalid messaging key registration response.")
+        val rawLightningAddress = messageKeyManager.fetchLocalLightningAddressForV4Send(walletManager)
+            ?: throw IllegalStateException("Create a Lightning Address before activating messaging.")
+        return SenderMessagingBindingV4(
+            binding = binding,
+            rawLightningAddress = rawLightningAddress
+        )
     }
 
     private suspend fun sendEncodedMessage(
@@ -631,7 +663,7 @@ class MessagingRepository(
     }
 
     private suspend fun sendResolvedEncodedMessage(
-        senderBinding: MessagingIdentityBindingPayload,
+        senderBinding: SenderMessagingBindingV4,
         recipient: MessagingRecipient,
         plaintext: String,
         messageType: String,
@@ -655,7 +687,7 @@ class MessagingRepository(
                 senderBinding = senderBinding,
                 recipient = currentRecipient,
                 createdAtClientMs = createdAtMillis,
-                envelopeVersion = 3,
+                envelopeVersion = 4,
                 clientMessageId = clientMessageId,
                 messageKeyManager = messageKeyManager,
                 walletManager = walletManager
@@ -691,7 +723,7 @@ class MessagingRepository(
                     senderBinding = senderBinding,
                     recipient = currentRecipient,
                     createdAtClientMs = createdAtMillis,
-                    envelopeVersion = 3,
+                envelopeVersion = 4,
                     clientMessageId = clientMessageId,
                     messageKeyManager = messageKeyManager,
                     walletManager = walletManager
@@ -720,8 +752,8 @@ class MessagingRepository(
             isIncoming = false,
             isRead = true,
             senderWalletPubkey = senderBinding.walletPubkey,
-            senderMessagingPubkey = senderBinding.messagingPubkey,
-            senderLightningAddress = senderBinding.lightningAddress,
+            senderMessagingPubkey = senderBinding.binding.messagingPubkey,
+            senderLightningAddress = senderBinding.rawLightningAddress,
             recipientWalletPubkey = currentRecipient.walletPubkey,
             recipientMessagingPubkey = currentRecipient.messagingPubkey,
             recipientLightningAddress = currentRecipient.lightningAddress,
@@ -751,12 +783,16 @@ class MessagingRepository(
     ): JSONObject {
         val requestBody = JSONObject()
             .put("clientMessageId", clientMessageId)
-            .put("recipient", recipient.identityBindingPayload.toJson())
+            .put(
+                "recipient",
+                recipient.identityBindingPayloadV4?.toJson()
+                    ?: throw IllegalStateException("Recipient messaging identity is incomplete.")
+            )
             .put("ciphertext", encryptedPayload.ciphertextBase64)
             .put("nonce", encryptedPayload.nonceBase64)
             .put("senderEphemeralPubkey", encryptedPayload.senderEphemeralPubkeyHex)
             .put("createdAtClientMs", createdAtMillis)
-            .put("envelopeVersion", encryptedPayload.envelopeVersion)
+            .put("envelopeVersion", 4)
             .put("messageType", messageType)
 
         if (!attachmentIds.isNullOrEmpty()) {
@@ -766,11 +802,11 @@ class MessagingRepository(
 
         sameKeyRetryCount?.let { requestBody.put("sameKeyRetryCount", it) }
 
-        var response = httpClient.postJson("/messaging/v3/send", requestBody.toString())
+        var response = httpClient.postJson("/messaging/v4/send", requestBody.toString())
         if (response.statusCode == 401 || response.statusCode == 403) {
             authManager.invalidateSession()
             authManager.ensureSession(walletManager)
-            response = httpClient.postJson("/messaging/v3/send", requestBody.toString())
+            response = httpClient.postJson("/messaging/v4/send", requestBody.toString())
         }
 
         if (response.statusCode == 409 && isRecipientBindingStale(response.body)) {
@@ -790,11 +826,11 @@ class MessagingRepository(
     ): List<InboxMessage> {
         authManager.ensureSession(walletManager)
 
-        var response = httpClient.get("/messaging/v3/inbox")
+        var response = httpClient.get("/messaging/v4/inbox")
         if (response.statusCode == 401 || response.statusCode == 403) {
             authManager.invalidateSession()
             authManager.ensureSession(walletManager)
-            response = httpClient.get("/messaging/v3/inbox")
+            response = httpClient.get("/messaging/v4/inbox")
         }
 
         if (response.statusCode !in 200..299) {
@@ -810,7 +846,8 @@ class MessagingRepository(
                     InboxMessage(
                         messageId = json.getString("messageId"),
                         clientMessageId = json.getString("clientMessageId"),
-                        senderWalletPubkey = json.getString("senderWalletPubkey"),
+                        senderMessagingAccountId = json.optString("senderMessagingAccountId").ifBlank { null },
+                        senderWalletPubkey = json.optString("senderWalletPubkey").ifBlank { null },
                         senderMessagingPubkey = json.getString("senderMessagingPubkey"),
                         senderLightningAddress = json.optString("senderLightningAddress").ifBlank { null },
                         senderMessagingIdentitySignature = json.optString("senderMessagingIdentitySignature").ifBlank { null },
@@ -820,9 +857,10 @@ class MessagingRepository(
                         ),
                         senderEnvelopeSignature = json.optString("senderEnvelopeSignature").ifBlank { null },
                         senderEnvelopeSignatureVersion = json.optInt("senderEnvelopeSignatureVersion").takeIf { it != 0 },
-                        recipientWalletPubkey = json.getString("recipientWalletPubkey"),
+                        recipientMessagingAccountId = json.optString("recipientMessagingAccountId").ifBlank { null },
+                        recipientWalletPubkey = json.optString("recipientWalletPubkey").ifBlank { null },
                         recipientMessagingPubkey = json.getString("recipientMessagingPubkey"),
-                        recipientLightningAddress = json.getString("recipientLightningAddress"),
+                        recipientLightningAddress = json.optString("recipientLightningAddress").ifBlank { null },
                         messageType = json.optString("messageType", "text").ifBlank { "text" },
                         envelopeVersion = json.optInt("envelopeVersion", 1),
                         ciphertext = json.optString("ciphertext").ifBlank { null },
@@ -847,11 +885,11 @@ class MessagingRepository(
     ): List<OutgoingMessageStatus> {
         authManager.ensureSession(walletManager)
 
-        var response = httpClient.get("/messaging/v3/outgoing-statuses?limit=200")
+        var response = httpClient.get("/messaging/v4/outgoing-statuses?limit=200")
         if (response.statusCode == 401 || response.statusCode == 403) {
             authManager.invalidateSession()
             authManager.ensureSession(walletManager)
-            response = httpClient.get("/messaging/v3/outgoing-statuses?limit=200")
+            response = httpClient.get("/messaging/v4/outgoing-statuses?limit=200")
         }
 
         if (response.statusCode !in 200..299) {
@@ -937,12 +975,72 @@ class MessagingRepository(
         messageStore.upsertRecipientMetadata(metadataItems)
     }
 
-    private fun decryptInboxMessage(inboxMessage: InboxMessage): StoredMessage? {
-        return if (inboxMessage.envelopeVersion >= 3) {
+    private fun decryptInboxMessage(
+        inboxMessage: InboxMessage,
+        localRecipientBindingV4: MessagingIdentityBindingPayloadV4,
+        localLightningAddress: String?
+    ): StoredMessage? {
+        return if (inboxMessage.envelopeVersion >= 4) {
+            decryptSealedInboxMessageV4(
+                inboxMessage = inboxMessage,
+                localRecipientBindingV4 = localRecipientBindingV4,
+                localLightningAddress = localLightningAddress
+            )
+        } else if (inboxMessage.envelopeVersion >= 3) {
             decryptSealedInboxMessage(inboxMessage)
         } else {
             decryptLegacyInboxMessage(inboxMessage)
         }
+    }
+
+    private fun decryptSealedInboxMessageV4(
+        inboxMessage: InboxMessage,
+        localRecipientBindingV4: MessagingIdentityBindingPayloadV4,
+        localLightningAddress: String?
+    ): StoredMessage {
+        val plaintext = decryptInboxCiphertext(inboxMessage)
+        val sealedPayload = try {
+            plaintext.toSealedSenderMessagePayloadV4()
+        } catch (error: Exception) {
+            throw RecoverableInboxMessageException(
+                reason = InboxRecoveryFailureReason.SEALED_PAYLOAD_DECODE_FAILED,
+                message = "Inbox message payload decode failed.",
+                cause = error
+            )
+        }
+        try {
+            MessageBindingVerifier.verifySealedIncomingEnvelopeV4(
+                message = inboxMessage,
+                sealedPayload = sealedPayload,
+                recipientBinding = localRecipientBindingV4
+            )
+        } catch (error: Exception) {
+            throw RecoverableInboxMessageException(
+                reason = InboxRecoveryFailureReason.SEALED_ENVELOPE_VERIFICATION_FAILED,
+                message = "Inbox sealed message verification failed.",
+                cause = error
+            )
+        }
+        return StoredMessage(
+            id = inboxMessage.messageId,
+            conversationId = sealedPayload.sender.walletPubkey,
+            clientMessageId = inboxMessage.clientMessageId,
+            body = sealedPayload.body,
+            createdAtMillis = inboxMessage.createdAtClientMillis
+                ?: inboxMessage.createdAtMillis
+                ?: System.currentTimeMillis(),
+            isIncoming = true,
+            isRead = false,
+            senderWalletPubkey = sealedPayload.sender.walletPubkey,
+            senderMessagingPubkey = sealedPayload.sender.messagingPubkey,
+            senderLightningAddress = runCatching {
+                MessagingPrivacyV4.normalizeLightningAddress(sealedPayload.senderLightningAddress)
+            }.getOrNull(),
+            recipientWalletPubkey = localRecipientBindingV4.walletPubkey,
+            recipientMessagingPubkey = inboxMessage.recipientMessagingPubkey,
+            recipientLightningAddress = localLightningAddress.orEmpty(),
+            messageType = inboxMessage.messageType
+        )
     }
 
     private fun decryptSealedInboxMessage(inboxMessage: InboxMessage): StoredMessage {
@@ -978,9 +1076,9 @@ class MessagingRepository(
             senderWalletPubkey = sealedPayload.sender.walletPubkey,
             senderMessagingPubkey = sealedPayload.sender.messagingPubkey,
             senderLightningAddress = sealedPayload.sender.lightningAddress,
-            recipientWalletPubkey = inboxMessage.recipientWalletPubkey,
+            recipientWalletPubkey = inboxMessage.recipientWalletPubkey.orEmpty(),
             recipientMessagingPubkey = inboxMessage.recipientMessagingPubkey,
-            recipientLightningAddress = inboxMessage.recipientLightningAddress,
+            recipientLightningAddress = inboxMessage.recipientLightningAddress.orEmpty(),
             messageType = inboxMessage.messageType
         )
     }
@@ -998,7 +1096,7 @@ class MessagingRepository(
         val plaintext = decryptInboxCiphertext(inboxMessage)
         return StoredMessage(
             id = inboxMessage.messageId,
-            conversationId = inboxMessage.senderWalletPubkey,
+            conversationId = inboxMessage.senderWalletPubkey.orEmpty(),
             clientMessageId = inboxMessage.clientMessageId,
             body = plaintext,
             createdAtMillis = inboxMessage.createdAtClientMillis
@@ -1006,12 +1104,12 @@ class MessagingRepository(
                 ?: System.currentTimeMillis(),
             isIncoming = true,
             isRead = false,
-            senderWalletPubkey = inboxMessage.senderWalletPubkey,
+            senderWalletPubkey = inboxMessage.senderWalletPubkey.orEmpty(),
             senderMessagingPubkey = inboxMessage.senderMessagingPubkey,
             senderLightningAddress = inboxMessage.senderLightningAddress,
-            recipientWalletPubkey = inboxMessage.recipientWalletPubkey,
+            recipientWalletPubkey = inboxMessage.recipientWalletPubkey.orEmpty(),
             recipientMessagingPubkey = inboxMessage.recipientMessagingPubkey,
-            recipientLightningAddress = inboxMessage.recipientLightningAddress,
+            recipientLightningAddress = inboxMessage.recipientLightningAddress.orEmpty(),
             messageType = inboxMessage.messageType
         )
     }
@@ -1215,8 +1313,9 @@ class MessagingRepository(
         authManager.ensureSession(walletManager)
 
         var response = httpClient.postMultipart(
-            path = "/messaging/v2/attachments/upload",
-            formFields = recipient.identityBindingPayload.toMultipartFields(),
+            path = "/messaging/v4/attachments/upload",
+            formFields = recipient.identityBindingPayloadV4?.toMultipartFields()
+                ?: throw IllegalStateException("Recipient messaging identity is incomplete."),
             fileFieldName = "attachment",
             fileName = fileName,
             mimeType = "application/octet-stream",
@@ -1226,8 +1325,9 @@ class MessagingRepository(
             authManager.invalidateSession()
             authManager.ensureSession(walletManager)
             response = httpClient.postMultipart(
-                path = "/messaging/v2/attachments/upload",
-                formFields = recipient.identityBindingPayload.toMultipartFields(),
+                path = "/messaging/v4/attachments/upload",
+                formFields = recipient.identityBindingPayloadV4?.toMultipartFields()
+                    ?: throw IllegalStateException("Recipient messaging identity is incomplete."),
                 fileFieldName = "attachment",
                 fileName = fileName,
                 mimeType = "application/octet-stream",
@@ -1242,7 +1342,7 @@ class MessagingRepository(
         val attachmentJson = JSONObject(response.body).getJSONObject("attachment")
         return MessagingAttachmentRecord(
             attachmentId = attachmentJson.getString("attachmentId"),
-            recipientLightningAddress = attachmentJson.getString("recipientLightningAddress"),
+            recipientLightningAddress = attachmentJson.optString("recipientLightningAddress").ifBlank { null },
             sizeBytes = attachmentJson.optInt("sizeBytes", 0),
             uploadContentType = attachmentJson.optString("uploadContentType", "application/octet-stream"),
             status = attachmentJson.optString("status", "uploaded"),
@@ -1260,11 +1360,11 @@ class MessagingRepository(
     ): BinaryHttpResponse {
         authManager.ensureSession(walletManager)
 
-        var response = httpClient.getBytes("/messaging/attachments/$attachmentId/download")
+        var response = httpClient.getBytes("/messaging/v4/attachments/$attachmentId/download")
         if (response.statusCode == 401 || response.statusCode == 403) {
             authManager.invalidateSession()
             authManager.ensureSession(walletManager)
-            response = httpClient.getBytes("/messaging/attachments/$attachmentId/download")
+            response = httpClient.getBytes("/messaging/v4/attachments/$attachmentId/download")
         }
 
         if (response.statusCode !in 200..299) {
@@ -1283,11 +1383,11 @@ class MessagingRepository(
         if (attachmentIds.isEmpty()) return
         val idArray = JSONArray().apply { attachmentIds.forEach { put(it) } }
         val requestBody = JSONObject().put("attachmentIds", idArray)
-        var response = httpClient.postJson("/messaging/attachments/mark-received", requestBody.toString())
+        var response = httpClient.postJson("/messaging/v4/attachments/mark-received", requestBody.toString())
         if (response.statusCode == 401 || response.statusCode == 403) {
             authManager.invalidateSession()
             authManager.ensureSession(walletManager)
-            response = httpClient.postJson("/messaging/attachments/mark-received", requestBody.toString())
+            response = httpClient.postJson("/messaging/v4/attachments/mark-received", requestBody.toString())
         }
         if (response.statusCode !in 200..299) {
             throw IllegalStateException(extractServerError(response.body, response.statusCode))
@@ -1305,11 +1405,11 @@ class MessagingRepository(
             messageIds.forEach { put(it) }
         }
         val requestBody = JSONObject().put("messageIds", messageIdArray)
-        var response = httpClient.postJson("/messaging/v3/ack", requestBody.toString())
+        var response = httpClient.postJson("/messaging/v4/ack", requestBody.toString())
         if (response.statusCode == 401 || response.statusCode == 403) {
             authManager.invalidateSession()
             authManager.ensureSession(walletManager)
-            response = httpClient.postJson("/messaging/v3/ack", requestBody.toString())
+            response = httpClient.postJson("/messaging/v4/ack", requestBody.toString())
         }
 
         if (response.statusCode !in 200..299) {
@@ -1328,11 +1428,11 @@ class MessagingRepository(
             messageIds.forEach { put(it) }
         }
         val requestBody = JSONObject().put("messageIds", messageIdArray)
-        var response = httpClient.postJson("/messaging/v3/rekey-required", requestBody.toString())
+        var response = httpClient.postJson("/messaging/v4/rekey-required", requestBody.toString())
         if (response.statusCode == 401 || response.statusCode == 403) {
             authManager.invalidateSession()
             authManager.ensureSession(walletManager)
-            response = httpClient.postJson("/messaging/v3/rekey-required", requestBody.toString())
+            response = httpClient.postJson("/messaging/v4/rekey-required", requestBody.toString())
         }
 
         if (response.statusCode !in 200..299) {
@@ -1359,11 +1459,11 @@ class MessagingRepository(
         val requestBody = JSONObject()
             .put("messageIds", messageIdArray)
             .put("failureReasons", reasonJson)
-        var response = httpClient.postJson("/messaging/v3/decrypt-failed", requestBody.toString())
+        var response = httpClient.postJson("/messaging/v4/decrypt-failed", requestBody.toString())
         if (response.statusCode == 401 || response.statusCode == 403) {
             authManager.invalidateSession()
             authManager.ensureSession(walletManager)
-            response = httpClient.postJson("/messaging/v3/decrypt-failed", requestBody.toString())
+            response = httpClient.postJson("/messaging/v4/decrypt-failed", requestBody.toString())
         }
 
         if (response.statusCode !in 200..299) {
@@ -1404,7 +1504,7 @@ class MessagingRepository(
 private suspend fun buildSealedSenderPayloadString(
     plaintext: String,
     messageType: String,
-    senderBinding: MessagingIdentityBindingPayload,
+    senderBinding: MessagingRepository.SenderMessagingBindingV4,
     recipient: MessagingRecipient,
     createdAtClientMs: Long,
     envelopeVersion: Int,
@@ -1412,28 +1512,29 @@ private suspend fun buildSealedSenderPayloadString(
     messageKeyManager: MessageKeyManager,
     walletManager: WalletManager
 ): String {
-    val messageSignatureVersion = 2
-    val canonicalEnvelopeMessage = MessageBindingVerifier.buildMessagingEnvelopeSignatureMessage(
+    val recipientBinding = recipient.identityBindingPayloadV4
+        ?: throw IllegalStateException("Recipient messaging identity is incomplete.")
+    val messageSignatureVersion = 3
+    val canonicalEnvelopeMessage = MessageBindingVerifier.buildMessagingEnvelopeSignatureMessageV4(
         version = messageSignatureVersion,
         clientMessageId = clientMessageId,
-        senderBinding = senderBinding,
-        recipientWalletPubkey = recipient.walletPubkey,
-        recipientLightningAddress = recipient.lightningAddress,
-        recipientMessagingPubkey = recipient.messagingPubkey,
+        senderBinding = senderBinding.binding,
+        recipientBinding = recipientBinding,
         messageType = messageType,
         plaintext = plaintext,
         createdAtClientMs = createdAtClientMs,
         envelopeVersion = envelopeVersion
     )
-    val signingCertificate = messageKeyManager.currentMessageSigningCertificate(
-        senderBinding = senderBinding,
+    val signingCertificate = messageKeyManager.currentMessageSigningCertificateV4(
+        senderBinding = senderBinding.binding,
         walletManager = walletManager
     )
     val messageSignature = messageKeyManager.signMessageEnvelope(canonicalEnvelopeMessage)
 
     return JSONObject()
         .put("body", plaintext)
-        .put("sender", senderBinding.toJson())
+        .put("sender", senderBinding.binding.toJson())
+        .put("senderLightningAddress", senderBinding.rawLightningAddress)
         .put("messagingSigningPubkey", signingCertificate.messagingSigningPubkey)
         .put("messagingSigningPubkeySignature", signingCertificate.messagingSigningPubkeySignature)
         .put("messagingSigningPubkeySignatureVersion", signingCertificate.messagingSigningPubkeySignatureVersion)
@@ -1453,10 +1554,33 @@ private fun MessagingIdentityBindingPayload.toJson(): JSONObject {
         .put("messagingIdentitySignedAt", messagingIdentitySignedAtSeconds)
 }
 
+private fun MessagingIdentityBindingPayloadV4.toJson(): JSONObject {
+    return JSONObject()
+        .put("walletPubkey", walletPubkey)
+        .put("lightningAddressHash", lightningAddressHash)
+        .put("lightningAddressHashScheme", lightningAddressHashScheme)
+        .put("messagingPubkey", messagingPubkey)
+        .put("messagingIdentitySignature", messagingIdentitySignature)
+        .put("messagingIdentitySignatureVersion", messagingIdentitySignatureVersion)
+        .put("messagingIdentitySignedAt", messagingIdentitySignedAtSeconds)
+}
+
 private fun MessagingIdentityBindingPayload.toMultipartFields(): Map<String, String> {
     return mapOf(
         "walletPubkey" to walletPubkey,
         "lightningAddress" to lightningAddress,
+        "messagingPubkey" to messagingPubkey,
+        "messagingIdentitySignature" to messagingIdentitySignature,
+        "messagingIdentitySignatureVersion" to messagingIdentitySignatureVersion.toString(),
+        "messagingIdentitySignedAt" to messagingIdentitySignedAtSeconds.toString()
+    )
+}
+
+private fun MessagingIdentityBindingPayloadV4.toMultipartFields(): Map<String, String> {
+    return mapOf(
+        "walletPubkey" to walletPubkey,
+        "lightningAddressHash" to lightningAddressHash,
+        "lightningAddressHashScheme" to lightningAddressHashScheme,
         "messagingPubkey" to messagingPubkey,
         "messagingIdentitySignature" to messagingIdentitySignature,
         "messagingIdentitySignatureVersion" to messagingIdentitySignatureVersion.toString(),
@@ -1477,6 +1601,30 @@ private fun String.toSealedSenderMessagePayload(): SealedSenderMessagePayload {
             messagingIdentitySignatureVersion = senderJson.getInt("messagingIdentitySignatureVersion"),
             messagingIdentitySignedAtSeconds = senderJson.getLong("messagingIdentitySignedAt")
         ),
+        messagingSigningPubkey = json.getString("messagingSigningPubkey"),
+        messagingSigningPubkeySignature = json.getString("messagingSigningPubkeySignature"),
+        messagingSigningPubkeySignatureVersion = json.getInt("messagingSigningPubkeySignatureVersion"),
+        messagingSigningPubkeySignedAt = json.getLong("messagingSigningPubkeySignedAt"),
+        messageSignature = json.getString("messageSignature"),
+        messageSignatureVersion = json.getInt("messageSignatureVersion")
+    )
+}
+
+private fun String.toSealedSenderMessagePayloadV4(): SealedSenderMessagePayloadV4 {
+    val json = JSONObject(this)
+    val senderJson = json.getJSONObject("sender")
+    return SealedSenderMessagePayloadV4(
+        body = json.getString("body"),
+        sender = MessagingIdentityBindingPayloadV4(
+            walletPubkey = senderJson.getString("walletPubkey"),
+            lightningAddressHash = senderJson.getString("lightningAddressHash"),
+            lightningAddressHashScheme = senderJson.getString("lightningAddressHashScheme"),
+            messagingPubkey = senderJson.getString("messagingPubkey"),
+            messagingIdentitySignature = senderJson.getString("messagingIdentitySignature"),
+            messagingIdentitySignatureVersion = senderJson.getInt("messagingIdentitySignatureVersion"),
+            messagingIdentitySignedAtSeconds = senderJson.getLong("messagingIdentitySignedAt")
+        ),
+        senderLightningAddress = json.getString("senderLightningAddress"),
         messagingSigningPubkey = json.getString("messagingSigningPubkey"),
         messagingSigningPubkeySignature = json.getString("messagingSigningPubkeySignature"),
         messagingSigningPubkeySignatureVersion = json.getInt("messagingSigningPubkeySignatureVersion"),
@@ -1514,9 +1662,18 @@ private fun JSONObject.toDirectoryProofPayload(): MessagingDirectoryProofPayload
     )
 }
 
+private fun JSONObject.signedAtMillis(name: String): Long? {
+    if (!has(name) || isNull(name)) return null
+    return when (val value = opt(name)) {
+        is Number -> value.toLong() * 1000L
+        is String -> value.toLongOrNull()?.let { it * 1000L } ?: isoStringToMillis(value)
+        else -> null
+    }
+}
+
 data class MessagingAttachmentRecord(
     val attachmentId: String,
-    val recipientLightningAddress: String,
+    val recipientLightningAddress: String?,
     val sizeBytes: Int,
     val uploadContentType: String,
     val status: String,
