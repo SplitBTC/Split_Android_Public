@@ -130,8 +130,6 @@ import com.split.android.data.wallet.WalletState
 import com.split.android.data.wallet.usesTor
 import com.split.android.ui.SplitFeatureIcons
 import com.split.android.ui.SplitRootViewModel
-import com.split.android.ui.events.BitcoinEventsScreen
-import com.split.android.ui.home.ClaimBitcoinScreen
 import com.split.android.ui.qr.IdentityShareSheet
 import com.split.android.ui.qr.SplitFullScreenQrScanner
 import com.split.android.ui.rewards.RewardsHowItWorksParagraphs
@@ -161,8 +159,6 @@ private enum class ProfileRoute {
     ECLAIR_NODE,
     SPARK_SUBWALLET,
     ADD_MERCHANT,
-    CLAIM_BITCOIN,
-    BITCOIN_EVENTS,
     REWARDS_INFO,
     SUPPORT,
     CONTENT_MODERATION,
@@ -292,16 +288,6 @@ fun ProfileScreen(
             onBack = { route = ProfileRoute.HOME }
         )
 
-        ProfileRoute.CLAIM_BITCOIN -> ClaimBitcoinScreen(
-            rootViewModel = rootViewModel,
-            onDismiss = { route = ProfileRoute.HOME }
-        )
-
-        ProfileRoute.BITCOIN_EVENTS -> BitcoinEventsScreen(
-            rootViewModel = rootViewModel,
-            onBack = { route = ProfileRoute.HOME }
-        )
-
         ProfileRoute.REWARDS_INFO -> RewardsExplainedScreen(
             onBack = { route = ProfileRoute.HOME }
         )
@@ -381,7 +367,6 @@ private fun ProfileHomeScreen(
             ProfileRoute.ADD_MERCHANT
         ),
         ProfileEntry(SplitFeatureIcons.Rewards, "Rewards Explained", "How it works.", ProfileRoute.REWARDS_INFO),
-        ProfileEntry(Icons.Rounded.CurrencyBitcoin, "Claim Your Bitcoin", "On-chain deposits.", ProfileRoute.CLAIM_BITCOIN),
         ProfileEntry(Icons.Rounded.ChatBubble, "Contact / Support", "Questions, feedback, and product ideas.", ProfileRoute.SUPPORT),
         ProfileEntry(Icons.Rounded.Flag, "Content Moderation", "Blocking and user safety.", ProfileRoute.CONTENT_MODERATION),
         ProfileEntry(Icons.Rounded.Description, "Legal", "Documents and agreements.", ProfileRoute.LEGAL),

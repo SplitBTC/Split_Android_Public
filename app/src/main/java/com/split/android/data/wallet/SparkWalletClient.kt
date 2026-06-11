@@ -2,20 +2,15 @@ package com.split.android.data.wallet
 
 import breez_sdk_spark.BreezSdk
 import breez_sdk_spark.BuyBitcoinRequest
-import breez_sdk_spark.ClaimDepositRequest
 import breez_sdk_spark.CheckLightningAddressRequest
-import breez_sdk_spark.DepositClaimError
-import breez_sdk_spark.Fee
 import breez_sdk_spark.ConnectRequest
 import breez_sdk_spark.EventListener
 import breez_sdk_spark.FeePolicy
 import breez_sdk_spark.GetInfoRequest
 import breez_sdk_spark.InputType
 import breez_sdk_spark.AddContactRequest
-import breez_sdk_spark.ListUnclaimedDepositsRequest
 import breez_sdk_spark.ListContactsRequest
 import breez_sdk_spark.LnurlPayRequest
-import breez_sdk_spark.MaxFee
 import breez_sdk_spark.PrepareLnurlPayRequest
 import breez_sdk_spark.PrepareLnurlPayResponse
 import breez_sdk_spark.PrepareSendPaymentRequest
@@ -137,16 +132,6 @@ data class ReceiveInvoice(
     val feeSats: Long
 )
 
-data class UnclaimedBitcoinDeposit(
-    val txid: String,
-    val vout: Int,
-    val amountSats: Long,
-    val requiredFeeSats: Long?,
-    val requiredFeeRateSatPerVbyte: Long?,
-    val currentMaxFeeDescription: String?,
-    val failureReason: String?
-)
-
 sealed interface PreparedOutgoingPaymentSendResult {
     data class Completed(val paymentId: String) : PreparedOutgoingPaymentSendResult
     data class Pending(val paymentId: String?) : PreparedOutgoingPaymentSendResult
@@ -179,12 +164,6 @@ interface SparkWalletClient {
         description: String?
     ): ReceiveInvoice
     suspend fun createCashAppBuyUrl(amountSats: Long?): String
-    suspend fun listUnclaimedBitcoinDeposits(): List<UnclaimedBitcoinDeposit>
-    suspend fun claimDepositWithRate(
-        txid: String,
-        vout: Int,
-        satPerVbyte: Long
-    )
     suspend fun currentWalletPubkey(): String
     suspend fun currentLightningAddressInfo(): WalletLightningAddressInfo?
     suspend fun currentLightningAddress(): String?
@@ -469,63 +448,6 @@ class BreezSparkWalletClient : SparkWalletClient {
         return currentSdk.buyBitcoin(
             BuyBitcoinRequest.CashApp(amountSats = normalizedAmountSats)
         ).url
-    }
-
-    override suspend fun listUnclaimedBitcoinDeposits(): List<UnclaimedBitcoinDeposit> {
-        val currentSdk = sdk ?: throw IllegalStateException("Spark wallet is not connected.")
-        return currentSdk.listUnclaimedDeposits(ListUnclaimedDepositsRequest).deposits.map { deposit ->
-            var requiredFeeSats: Long? = null
-            var requiredFeeRate: Long? = null
-            var currentMaxFeeDescription: String? = null
-            var failureReason: String? = null
-
-            when (val claimError = deposit.claimError) {
-                is DepositClaimError.MaxDepositClaimFeeExceeded -> {
-                    requiredFeeSats = claimError.requiredFeeSats.toLong()
-                    requiredFeeRate = claimError.requiredFeeRateSatPerVbyte.toLong()
-                    currentMaxFeeDescription = when (val maxFee = claimError.maxFee) {
-                        is Fee.Fixed -> "${maxFee.amount.toLong()} sats"
-                        is Fee.Rate -> "${maxFee.satPerVbyte.toLong()} sat/vB"
-                        null -> null
-                    }
-                }
-
-                is DepositClaimError.MissingUtxo -> {
-                    failureReason = "UTXO not found. Try again later."
-                }
-
-                is DepositClaimError.Generic -> {
-                    failureReason = claimError.message
-                }
-
-                null -> Unit
-            }
-
-            UnclaimedBitcoinDeposit(
-                txid = deposit.txid,
-                vout = deposit.vout.toInt(),
-                amountSats = deposit.amountSats.toLong(),
-                requiredFeeSats = requiredFeeSats,
-                requiredFeeRateSatPerVbyte = requiredFeeRate,
-                currentMaxFeeDescription = currentMaxFeeDescription,
-                failureReason = failureReason
-            )
-        }
-    }
-
-    override suspend fun claimDepositWithRate(
-        txid: String,
-        vout: Int,
-        satPerVbyte: Long
-    ) {
-        val currentSdk = sdk ?: throw IllegalStateException("Spark wallet is not connected.")
-        currentSdk.claimDeposit(
-            ClaimDepositRequest(
-                txid = txid,
-                vout = vout.toUInt(),
-                maxFee = MaxFee.Rate(satPerVbyte.toULong())
-            )
-        )
     }
 
     override suspend fun currentWalletPubkey(): String {

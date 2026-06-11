@@ -148,14 +148,12 @@ fun WalletHomeScreen(
     isStartingTorForActiveWallet: Boolean,
     onSelectWalletMenuItem: (SpendWalletMenuItem) -> Unit,
     onAddWallet: () -> Unit,
-    onOpenBitcoinEvents: () -> Unit,
     onOpenContacts: () -> Unit,
     onOpenProfile: () -> Unit,
     onOpenQrScanner: () -> Unit,
     onOpenMerchantMap: () -> Unit,
     loadBtcUsdPrice: suspend () -> Double,
     onStartCashAppBuyBitcoin: (amountSats: Long) -> Unit,
-    onTapClaimBitcoin: () -> Unit,
     onTapSend: () -> Unit,
     onTapReceive: () -> Unit,
     onTapTransactions: () -> Unit,
@@ -219,7 +217,6 @@ fun WalletHomeScreen(
             .padding(horizontal = 18.dp, vertical = 16.dp)
     ) {
         MainTabHeader(
-            onOpenBitcoinEvents = onOpenBitcoinEvents,
             onOpenContacts = onOpenContacts,
             onOpenProfile = onOpenProfile,
             onOpenMerchantMap = onOpenMerchantMap

@@ -196,7 +196,6 @@ private data class ComposeRecipientRecord(
 @Composable
 fun MessagesScreen(
     rootViewModel: SplitRootViewModel,
-    onOpenBitcoinEvents: () -> Unit,
     onOpenContacts: () -> Unit,
     onOpenProfile: () -> Unit,
     onOpenMerchantMap: () -> Unit,
@@ -408,7 +407,6 @@ fun MessagesScreen(
             onSearchQueryChange = { searchQuery = it },
             uiState = messagingUiState,
             onOpenContactsFromHeader = onOpenContacts,
-            onOpenBitcoinEvents = onOpenBitcoinEvents,
             onOpenProfile = onOpenProfile,
             onOpenMerchantMap = onOpenMerchantMap,
             modifier = modifier,
@@ -441,7 +439,6 @@ private fun MessagesListScreen(
     onSearchQueryChange: (String) -> Unit,
     uiState: com.split.android.data.messages.MessagingUiState,
     onOpenContactsFromHeader: () -> Unit,
-    onOpenBitcoinEvents: () -> Unit,
     onOpenProfile: () -> Unit,
     onOpenMerchantMap: () -> Unit,
     modifier: Modifier = Modifier,
@@ -465,7 +462,6 @@ private fun MessagesListScreen(
             verticalArrangement = Arrangement.spacedBy(14.dp)
         ) {
             MainTabHeader(
-                onOpenBitcoinEvents = onOpenBitcoinEvents,
                 onOpenContacts = onOpenContactsFromHeader,
                 onOpenProfile = onOpenProfile,
                 onOpenMerchantMap = onOpenMerchantMap
@@ -1199,6 +1195,14 @@ private fun MessageThreadScreen(
         rootViewModel.syncMessages(force = true)
         rootViewModel.syncOutgoingStatuses(force = true)
         refreshBlockState()
+    }
+
+    LaunchedEffect("live-message-sync", thread.conversationId) {
+        while (true) {
+            delay(4_000L)
+            rootViewModel.syncMessages(force = true)
+            rootViewModel.syncOutgoingStatuses(force = true)
+        }
     }
 
     LaunchedEffect(displayLightningAddress, thread.conversationId) {

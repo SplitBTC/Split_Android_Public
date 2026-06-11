@@ -117,11 +117,12 @@ class MessageKeyManager(
             .put("messagingIdentitySignatureVersion", identityEndpoint.signatureVersion)
             .put("messagingIdentitySignedAt", signedAtSeconds)
 
-        var response = httpClient.postJson(identityEndpoint.path, requestBody.toString())
+        val headers = authenticatedWalletPubkeyHeaders(signedMessage.pubkey)
+        var response = httpClient.postJson(identityEndpoint.path, requestBody.toString(), headers)
         if (response.statusCode == 401 || response.statusCode == 403) {
             authManager.invalidateSession()
             authManager.ensureSession(walletManager)
-            response = httpClient.postJson(identityEndpoint.path, requestBody.toString())
+            response = httpClient.postJson(identityEndpoint.path, requestBody.toString(), headers)
         }
 
         if (response.statusCode !in 200..299) {
@@ -313,11 +314,12 @@ class MessageKeyManager(
         authManager: AuthManager,
         walletManager: WalletManager
     ): RegistrationResponse {
-        var response = httpClient.get(identityEndpoint.path)
+        val headers = authenticatedWalletPubkeyHeaders(walletManager.currentWalletPubkey())
+        var response = httpClient.get(identityEndpoint.path, headers)
         if (response.statusCode == 401 || response.statusCode == 403) {
             authManager.invalidateSession()
             authManager.ensureSession(walletManager)
-            response = httpClient.get(identityEndpoint.path)
+            response = httpClient.get(identityEndpoint.path, headers)
         }
 
         if (response.statusCode !in 200..299) {
@@ -409,11 +411,12 @@ class MessageKeyManager(
             .put("messagingIdentitySignatureVersion", identityEndpoint.signatureVersion)
             .put("messagingIdentitySignedAt", signedAtSeconds)
 
-        var response = httpClient.postJson(identityEndpoint.path, requestBody.toString())
+        val headers = authenticatedWalletPubkeyHeaders(signedMessage.pubkey)
+        var response = httpClient.postJson(identityEndpoint.path, requestBody.toString(), headers)
         if (response.statusCode == 401 || response.statusCode == 403) {
             authManager.invalidateSession()
             authManager.ensureSession(walletManager)
-            response = httpClient.postJson(identityEndpoint.path, requestBody.toString())
+            response = httpClient.postJson(identityEndpoint.path, requestBody.toString(), headers)
         }
 
         if (response.statusCode !in 200..299) {

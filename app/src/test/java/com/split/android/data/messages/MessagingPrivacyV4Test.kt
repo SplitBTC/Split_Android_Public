@@ -6,10 +6,10 @@ import org.junit.Test
 class MessagingPrivacyV4Test {
     @Test
     fun lightningAddressHashMatchesBackendContract() {
-        val hash = MessagingPrivacyV4.lightningAddressClientHash(" Donate@Example.com ")
+        val hash = MessagingPrivacyV4.lightningAddressClientHash(" Donate@example.com ")
 
         assertEquals(
-            "6d9cb0138b1363847559a75ef691dcca6e60cfe41e18b867337e1623b346735c",
+            "5b302903b0b357301b2b5441b794e19bd26a1e6232e12b1b1f5764e9b5ff41ab",
             hash
         )
     }
@@ -18,7 +18,7 @@ class MessagingPrivacyV4Test {
     fun normalizeLightningAddressLowercasesAndTrims() {
         assertEquals(
             "donate@example.com",
-            MessagingPrivacyV4.normalizeLightningAddress(" Donate@Example.com ")
+            MessagingPrivacyV4.normalizeLightningAddress(" Donate@example.com ")
         )
     }
 }

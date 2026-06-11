@@ -12,7 +12,6 @@ import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.rounded.Menu
-import androidx.compose.material.icons.rounded.Public
 import androidx.compose.material3.Icon
 import androidx.compose.runtime.Composable
 import androidx.compose.ui.Alignment
@@ -29,7 +28,6 @@ private val MainTabHeaderPink = Color(0xFFBE3287)
 
 @Composable
 fun MainTabHeader(
-    onOpenBitcoinEvents: () -> Unit,
     onOpenContacts: () -> Unit,
     onOpenProfile: () -> Unit,
     onOpenMerchantMap: () -> Unit,
@@ -63,10 +61,6 @@ fun MainTabHeader(
             MainTabHeaderActionButton(
                 icon = SplitFeatureIcons.Store,
                 onClick = onOpenMerchantMap
-            )
-            MainTabHeaderActionButton(
-                icon = Icons.Rounded.Public,
-                onClick = onOpenBitcoinEvents
             )
             MainTabHeaderActionButton(
                 icon = Icons.Rounded.Menu,

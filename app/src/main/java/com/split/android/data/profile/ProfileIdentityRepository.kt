@@ -80,37 +80,4 @@ class ProfileIdentityRepository(
         }.getOrNull()
     }
 
-    suspend fun syncLightningAddress(
-        lightningAddress: String,
-        authManager: AuthManager,
-        walletManager: WalletManager
-    ) {
-        val normalized = lightningAddress.trim().lowercase()
-        require(normalized.isNotBlank()) { "Lightning address is invalid." }
-
-        authManager.ensureSession(walletManager)
-
-        val body = JSONObject()
-            .put("lightningAddress", normalized)
-            .toString()
-
-        var response = httpClient.postJson("/lightning-address", body)
-        if (response.statusCode == 401 || response.statusCode == 403) {
-            authManager.invalidateSession()
-            authManager.ensureSession(walletManager)
-            response = httpClient.postJson("/lightning-address", body)
-        }
-
-        if (response.statusCode !in 200..299) {
-            val serverMessage = runCatching {
-                JSONObject(response.body).optString("error")
-            }.getOrNull().orEmpty()
-
-            throw IllegalStateException(
-                serverMessage.ifBlank {
-                    "Failed to sync Lightning address (${response.statusCode})."
-                }
-            )
-        }
-    }
 }

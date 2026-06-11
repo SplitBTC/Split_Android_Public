@@ -15,7 +15,7 @@ object MessageBindingVerifier {
     private val supportedEnvelopeSignatureVersions = setOf(1, 2)
     private const val MESSAGING_ENVELOPE_V4_SIGNATURE_VERSION = 3
     private val MESSAGING_IDENTITY_DOMAIN = AppConfig.messagingIdentityDomain
-    private const val MESSAGING_IDENTITY_V4_DOMAIN = "splitrewards.messaging"
+    private const val MESSAGING_IDENTITY_V4_DOMAIN = "example.messaging"
     private val curveParams = SECNamedCurves.getByName("secp256k1")
     private val domainParameters = ECDomainParameters(
         curveParams.curve,

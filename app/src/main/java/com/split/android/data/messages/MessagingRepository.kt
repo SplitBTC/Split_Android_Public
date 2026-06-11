@@ -577,11 +577,12 @@ class MessagingRepository(
             .put("lightningAddressHash", lightningAddressHash)
             .put("lightningAddressHashScheme", MessagingPrivacyV4.LIGHTNING_ADDRESS_CLIENT_HASH_SCHEME)
 
-        var response = httpClient.postJson("/messaging/v4/directory/lookup", requestBody.toString())
+        val headers = authenticatedWalletPubkeyHeaders(walletManager.currentWalletPubkey())
+        var response = httpClient.postJson("/messaging/v4/directory/lookup", requestBody.toString(), headers)
         if (response.statusCode == 401 || response.statusCode == 403) {
             authManager.invalidateSession()
             authManager.ensureSession(walletManager)
-            response = httpClient.postJson("/messaging/v4/directory/lookup", requestBody.toString())
+            response = httpClient.postJson("/messaging/v4/directory/lookup", requestBody.toString(), headers)
         }
 
         if (response.statusCode !in 200..299) {
@@ -802,11 +803,12 @@ class MessagingRepository(
 
         sameKeyRetryCount?.let { requestBody.put("sameKeyRetryCount", it) }
 
-        var response = httpClient.postJson("/messaging/v4/send", requestBody.toString())
+        val headers = authenticatedWalletPubkeyHeaders(walletManager.currentWalletPubkey())
+        var response = httpClient.postJson("/messaging/v4/send", requestBody.toString(), headers)
         if (response.statusCode == 401 || response.statusCode == 403) {
             authManager.invalidateSession()
             authManager.ensureSession(walletManager)
-            response = httpClient.postJson("/messaging/v4/send", requestBody.toString())
+            response = httpClient.postJson("/messaging/v4/send", requestBody.toString(), headers)
         }
 
         if (response.statusCode == 409 && isRecipientBindingStale(response.body)) {
@@ -826,11 +828,12 @@ class MessagingRepository(
     ): List<InboxMessage> {
         authManager.ensureSession(walletManager)
 
-        var response = httpClient.get("/messaging/v4/inbox")
+        val headers = authenticatedWalletPubkeyHeaders(walletManager.currentWalletPubkey())
+        var response = httpClient.get("/messaging/v4/inbox", headers)
         if (response.statusCode == 401 || response.statusCode == 403) {
             authManager.invalidateSession()
             authManager.ensureSession(walletManager)
-            response = httpClient.get("/messaging/v4/inbox")
+            response = httpClient.get("/messaging/v4/inbox", headers)
         }
 
         if (response.statusCode !in 200..299) {
@@ -885,11 +888,12 @@ class MessagingRepository(
     ): List<OutgoingMessageStatus> {
         authManager.ensureSession(walletManager)
 
-        var response = httpClient.get("/messaging/v4/outgoing-statuses?limit=200")
+        val headers = authenticatedWalletPubkeyHeaders(walletManager.currentWalletPubkey())
+        var response = httpClient.get("/messaging/v4/outgoing-statuses?limit=200", headers)
         if (response.statusCode == 401 || response.statusCode == 403) {
             authManager.invalidateSession()
             authManager.ensureSession(walletManager)
-            response = httpClient.get("/messaging/v4/outgoing-statuses?limit=200")
+            response = httpClient.get("/messaging/v4/outgoing-statuses?limit=200", headers)
         }
 
         if (response.statusCode !in 200..299) {
@@ -1311,27 +1315,30 @@ class MessagingRepository(
         walletManager: WalletManager
     ): MessagingAttachmentRecord {
         authManager.ensureSession(walletManager)
+        val formFields = recipient.identityBindingPayloadV4?.toMultipartFields()
+            ?: throw IllegalStateException("Recipient messaging identity is incomplete.")
+        val headers = authenticatedWalletPubkeyHeaders(walletManager.currentWalletPubkey())
 
         var response = httpClient.postMultipart(
             path = "/messaging/v4/attachments/upload",
-            formFields = recipient.identityBindingPayloadV4?.toMultipartFields()
-                ?: throw IllegalStateException("Recipient messaging identity is incomplete."),
+            formFields = formFields,
             fileFieldName = "attachment",
             fileName = fileName,
             mimeType = "application/octet-stream",
-            fileData = fileData
+            fileData = fileData,
+            headers = headers
         )
         if (response.statusCode == 401 || response.statusCode == 403) {
             authManager.invalidateSession()
             authManager.ensureSession(walletManager)
             response = httpClient.postMultipart(
                 path = "/messaging/v4/attachments/upload",
-                formFields = recipient.identityBindingPayloadV4?.toMultipartFields()
-                    ?: throw IllegalStateException("Recipient messaging identity is incomplete."),
+                formFields = formFields,
                 fileFieldName = "attachment",
                 fileName = fileName,
                 mimeType = "application/octet-stream",
-                fileData = fileData
+                fileData = fileData,
+                headers = headers
             )
         }
 
@@ -1360,11 +1367,12 @@ class MessagingRepository(
     ): BinaryHttpResponse {
         authManager.ensureSession(walletManager)
 
-        var response = httpClient.getBytes("/messaging/v4/attachments/$attachmentId/download")
+        val headers = authenticatedWalletPubkeyHeaders(walletManager.currentWalletPubkey())
+        var response = httpClient.getBytes("/messaging/v4/attachments/$attachmentId/download", headers)
         if (response.statusCode == 401 || response.statusCode == 403) {
             authManager.invalidateSession()
             authManager.ensureSession(walletManager)
-            response = httpClient.getBytes("/messaging/v4/attachments/$attachmentId/download")
+            response = httpClient.getBytes("/messaging/v4/attachments/$attachmentId/download", headers)
         }
 
         if (response.statusCode !in 200..299) {
@@ -1383,11 +1391,12 @@ class MessagingRepository(
         if (attachmentIds.isEmpty()) return
         val idArray = JSONArray().apply { attachmentIds.forEach { put(it) } }
         val requestBody = JSONObject().put("attachmentIds", idArray)
-        var response = httpClient.postJson("/messaging/v4/attachments/mark-received", requestBody.toString())
+        val headers = authenticatedWalletPubkeyHeaders(walletManager.currentWalletPubkey())
+        var response = httpClient.postJson("/messaging/v4/attachments/mark-received", requestBody.toString(), headers)
         if (response.statusCode == 401 || response.statusCode == 403) {
             authManager.invalidateSession()
             authManager.ensureSession(walletManager)
-            response = httpClient.postJson("/messaging/v4/attachments/mark-received", requestBody.toString())
+            response = httpClient.postJson("/messaging/v4/attachments/mark-received", requestBody.toString(), headers)
         }
         if (response.statusCode !in 200..299) {
             throw IllegalStateException(extractServerError(response.body, response.statusCode))
@@ -1405,11 +1414,12 @@ class MessagingRepository(
             messageIds.forEach { put(it) }
         }
         val requestBody = JSONObject().put("messageIds", messageIdArray)
-        var response = httpClient.postJson("/messaging/v4/ack", requestBody.toString())
+        val headers = authenticatedWalletPubkeyHeaders(walletManager.currentWalletPubkey())
+        var response = httpClient.postJson("/messaging/v4/ack", requestBody.toString(), headers)
         if (response.statusCode == 401 || response.statusCode == 403) {
             authManager.invalidateSession()
             authManager.ensureSession(walletManager)
-            response = httpClient.postJson("/messaging/v4/ack", requestBody.toString())
+            response = httpClient.postJson("/messaging/v4/ack", requestBody.toString(), headers)
         }
 
         if (response.statusCode !in 200..299) {
@@ -1428,11 +1438,12 @@ class MessagingRepository(
             messageIds.forEach { put(it) }
         }
         val requestBody = JSONObject().put("messageIds", messageIdArray)
-        var response = httpClient.postJson("/messaging/v4/rekey-required", requestBody.toString())
+        val headers = authenticatedWalletPubkeyHeaders(walletManager.currentWalletPubkey())
+        var response = httpClient.postJson("/messaging/v4/rekey-required", requestBody.toString(), headers)
         if (response.statusCode == 401 || response.statusCode == 403) {
             authManager.invalidateSession()
             authManager.ensureSession(walletManager)
-            response = httpClient.postJson("/messaging/v4/rekey-required", requestBody.toString())
+            response = httpClient.postJson("/messaging/v4/rekey-required", requestBody.toString(), headers)
         }
 
         if (response.statusCode !in 200..299) {
@@ -1459,11 +1470,12 @@ class MessagingRepository(
         val requestBody = JSONObject()
             .put("messageIds", messageIdArray)
             .put("failureReasons", reasonJson)
-        var response = httpClient.postJson("/messaging/v4/decrypt-failed", requestBody.toString())
+        val headers = authenticatedWalletPubkeyHeaders(walletManager.currentWalletPubkey())
+        var response = httpClient.postJson("/messaging/v4/decrypt-failed", requestBody.toString(), headers)
         if (response.statusCode == 401 || response.statusCode == 403) {
             authManager.invalidateSession()
             authManager.ensureSession(walletManager)
-            response = httpClient.postJson("/messaging/v4/decrypt-failed", requestBody.toString())
+            response = httpClient.postJson("/messaging/v4/decrypt-failed", requestBody.toString(), headers)
         }
 
         if (response.statusCode !in 200..299) {

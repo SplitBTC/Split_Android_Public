@@ -9,6 +9,11 @@ import java.time.format.DateTimeFormatter
 import java.util.Locale
 
 const val DELIVERY_STATE_FAILED_SAME_KEY = "failed_same_key"
+const val AUTHENTICATED_WALLET_PUBKEY_HEADER = "X-Split-Wallet-Pubkey"
+
+fun authenticatedWalletPubkeyHeaders(walletPubkey: String): Map<String, String> {
+    return mapOf(AUTHENTICATED_WALLET_PUBKEY_HEADER to walletPubkey)
+}
 
 object MessagingPrivacyV4 {
     const val LIGHTNING_ADDRESS_CLIENT_HASH_SCHEME = "split-ln-address-sha256-v1"

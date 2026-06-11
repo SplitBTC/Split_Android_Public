@@ -102,11 +102,12 @@ class MessagingDeviceTokenManager(
                 .put("appVersion", appContext.packageManager.getPackageInfo(appContext.packageName, 0).versionName)
                 .put("bundleId", appContext.packageName)
 
-            var response = httpClient.postJson("/messaging/v4/device-registrations", body.toString())
+            val headers = authenticatedWalletPubkeyHeaders(signedMessage.pubkey)
+            var response = httpClient.postJson("/messaging/v4/device-registrations", body.toString(), headers)
             if (response.statusCode == 401 || response.statusCode == 403) {
                 authManager.invalidateSession()
                 authManager.ensureSession(walletManager)
-                response = httpClient.postJson("/messaging/v4/device-registrations", body.toString())
+                response = httpClient.postJson("/messaging/v4/device-registrations", body.toString(), headers)
             }
 
             if (response.statusCode == 409) {

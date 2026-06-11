@@ -505,29 +505,6 @@ class WalletManager(
         return sparkWalletClient.createCashAppBuyUrl(amountSats = amountSats)
     }
 
-    suspend fun listUnclaimedBitcoinDeposits(): List<UnclaimedBitcoinDeposit> {
-        val existingState = _state.value
-        require(existingState is WalletState.Ready) { "Wallet is not ready yet." }
-
-        return sparkWalletClient.listUnclaimedBitcoinDeposits()
-    }
-
-    suspend fun claimDepositWithRate(
-        txid: String,
-        vout: Int,
-        satPerVbyte: Long
-    ) {
-        val existingState = _state.value
-        require(existingState is WalletState.Ready) { "Wallet is not ready yet." }
-
-        sparkWalletClient.claimDepositWithRate(
-            txid = txid,
-            vout = vout,
-            satPerVbyte = satPerVbyte
-        )
-        refreshWalletState()
-    }
-
     suspend fun fetchTransactionRows(): List<WalletTransactionRow> {
         val existingState = _state.value
         require(existingState is WalletState.Ready) { "Wallet is not ready yet." }

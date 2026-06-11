@@ -98,9 +98,7 @@ import com.split.android.data.wallet.isReasonableRecoveryPhraseWord
 import com.split.android.data.wallet.normalizeRecoveryPhraseWord
 import com.split.android.data.wallet.normalizeRecoveryPhraseWords
 import com.split.android.ui.coupons.NearbyCouponsScreen
-import com.split.android.ui.events.BitcoinEventsScreen
 import com.split.android.ui.home.WalletHomeScreen
-import com.split.android.ui.home.ClaimBitcoinScreen
 import com.split.android.ui.home.SpendWalletMenuItem
 import com.split.android.ui.home.WalletReceiveScreen
 import com.split.android.ui.home.WalletSendScreen
@@ -130,8 +128,6 @@ private enum class WalletOverlay {
     RECEIVE,
     TRANSACTIONS,
     MERCHANT_MAP,
-    BITCOIN_EVENTS,
-    CLAIM_BITCOIN,
     PROFILE
 }
 
@@ -746,7 +742,7 @@ private fun WalletSeedBackupScreen(
             border = BorderStroke(1.dp, SplitBrandPink.copy(alpha = 0.40f))
         ) {
             Text(
-                text = "This is the only time Split will show you this recovery phrase. Save it now before continuing.",
+                text = "Save this recovery phrase before continuing. If this device is lost, replaced, or app data is erased, Split cannot recover it for you.",
                 modifier = Modifier.padding(14.dp),
                 style = MaterialTheme.typography.bodyMedium,
                 color = Color.White,
@@ -840,7 +836,7 @@ private fun WalletSeedBackupScreen(
                     fontWeight = FontWeight.SemiBold
                 )
                 Text(
-                    text = "Split cannot recover this phrase for you, and the app will not show it again after setup.",
+                    text = "Split cannot recover this phrase for you if this device is lost, replaced, or app data is erased.",
                     style = MaterialTheme.typography.bodyMedium,
                     color = Color.White.copy(alpha = 0.68f)
                 )
@@ -876,7 +872,7 @@ private fun WalletSeedBackupScreen(
                     )
                 )
                 Text(
-                    text = "I understand Split will not show this recovery phrase again.",
+                    text = "I saved my recovery phrase somewhere safe.",
                     modifier = Modifier.weight(1f),
                     style = MaterialTheme.typography.bodyMedium,
                     color = Color.White.copy(alpha = 0.88f),
@@ -1322,9 +1318,6 @@ private fun MainWalletShell(
             activeOverlay = null
         }
     }
-    val openMainTabBitcoinEvents = {
-        activeOverlay = WalletOverlay.BITCOIN_EVENTS
-    }
     val density = LocalDensity.current
     val isKeyboardVisible = WindowInsets.ime.getBottom(density) > 0
 
@@ -1408,7 +1401,6 @@ private fun MainWalletShell(
                         }
                     },
                     onAddWallet = openMainTabAddWallet,
-                    onOpenBitcoinEvents = openMainTabBitcoinEvents,
                     onOpenContacts = openMainTabContacts,
                     onOpenProfile = openMainTabProfile,
                     onOpenQrScanner = openMainTabQrScanner,
@@ -1434,7 +1426,6 @@ private fun MainWalletShell(
                             isLaunchingBuyBitcoin = false
                         }
                     },
-                    onTapClaimBitcoin = { activeOverlay = WalletOverlay.CLAIM_BITCOIN },
                     onTapSend = { openSendOverlay(SendOverlayConfig()) },
                     onTapReceive = { activeOverlay = WalletOverlay.RECEIVE },
                     onTapTransactions = { activeOverlay = WalletOverlay.TRANSACTIONS },
@@ -1446,7 +1437,6 @@ private fun MainWalletShell(
                 )
                 SplitDestination.REWARDS -> WalletRewardsScreen(
                     rootViewModel = rootViewModel,
-                    onOpenBitcoinEvents = openMainTabBitcoinEvents,
                     onOpenContacts = openMainTabContacts,
                     onOpenProfile = openMainTabProfile,
                     onOpenMerchantMap = openMainTabMerchantMap,
@@ -1460,7 +1450,6 @@ private fun MainWalletShell(
                 )
                 SplitDestination.MESSAGES -> MessagesScreen(
                     rootViewModel = rootViewModel,
-                    onOpenBitcoinEvents = openMainTabBitcoinEvents,
                     onOpenContacts = openMainTabContacts,
                     onOpenProfile = openMainTabProfile,
                     onOpenMerchantMap = openMainTabMerchantMap,
@@ -1516,16 +1505,6 @@ private fun MainWalletShell(
             )
 
             WalletOverlay.MERCHANT_MAP -> BtcMerchantMapScreen(
-                rootViewModel = rootViewModel,
-                onDismiss = { activeOverlay = null }
-            )
-
-            WalletOverlay.BITCOIN_EVENTS -> BitcoinEventsScreen(
-                rootViewModel = rootViewModel,
-                onBack = { activeOverlay = null }
-            )
-
-            WalletOverlay.CLAIM_BITCOIN -> ClaimBitcoinScreen(
                 rootViewModel = rootViewModel,
                 onDismiss = { activeOverlay = null }
             )

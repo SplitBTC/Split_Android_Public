@@ -6,11 +6,6 @@ import androidx.lifecycle.AndroidViewModel
 import androidx.lifecycle.viewModelScope
 import com.split.android.data.auth.AuthManager
 import com.split.android.data.auth.AuthState
-import com.split.android.data.events.BitcoinEventsRepository
-import com.split.android.data.events.BitcoinEventsResponse
-import com.split.android.data.coupons.MerchantCouponsRepository
-import com.split.android.data.coupons.NearbyCouponsResponse
-import com.split.android.data.coupons.RedeemNearbyCouponResponse
 import com.split.android.data.map.BtcMerchantMapRepository
 import com.split.android.data.map.BtcMerchantPlace
 import com.split.android.data.messages.MessageConversationPreview
@@ -31,6 +26,7 @@ import com.split.android.data.messages.MessageSendResult
 import com.split.android.data.messages.MessagingRepository
 import com.split.android.data.messages.MessagingUiState
 import com.split.android.data.messages.StoredMessage
+import com.split.android.data.network.HttpResponse
 import com.split.android.data.network.SplitHttpClient
 import com.split.android.data.pricing.BtcPriceRepository
 import com.split.android.data.pricing.BitcoinChartRange
@@ -87,7 +83,6 @@ import com.split.android.data.wallet.SparkSubwalletCredentials
 import com.split.android.data.wallet.SparkSubwalletException
 import com.split.android.data.wallet.SparkSubwalletManager
 import com.split.android.data.wallet.SparkSubwalletStore
-import com.split.android.data.wallet.UnclaimedBitcoinDeposit
 import com.split.android.data.wallet.WalletContact
 import com.split.android.data.wallet.WalletBackend
 import com.split.android.data.wallet.WalletLightningAddressInfo
@@ -104,6 +99,7 @@ import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.stateIn
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
+import org.json.JSONObject
 import kotlin.math.roundToInt
 
 private fun PreparedOutgoingPayment.withPreview(
@@ -143,8 +139,6 @@ class SplitRootViewModel(
     private val profileIdentityRepository = ProfileIdentityRepository(httpClient)
     private val btcMerchantMapRepository = BtcMerchantMapRepository()
     private val merchantReportRepository = MerchantReportRepository(httpClient)
-    private val merchantCouponsRepository = MerchantCouponsRepository(httpClient)
-    private val bitcoinEventsRepository = BitcoinEventsRepository(httpClient)
     private val messagingBlockRepository = MessagingBlockRepository(application, httpClient)
     private val sparkWalletClient = BreezSparkWalletClient()
     private val sparkSubwalletWalletClient = BreezSparkWalletClient()
@@ -549,19 +543,60 @@ class SplitRootViewModel(
     suspend fun deleteRewardsAccount() {
         authManager.ensureSession(walletManager)
 
-        var response = httpClient.postJson("/v1/account/delete", "{}")
-        if (response.statusCode == 401 || response.statusCode == 403) {
-            authManager.invalidateSession()
-            authManager.ensureSession(walletManager)
-            response = httpClient.postJson("/v1/account/delete", "{}")
-        }
+        val nonceResponse = fetchDeleteAccountNonce()
+        val signedMessage = walletManager.signAuthMessage(nonceResponse.messageToSign)
+        val requestBody = JSONObject()
+            .put("walletPubkey", signedMessage.pubkey)
+            .put("nonce", nonceResponse.nonce)
+            .put("signature", signedMessage.signature)
 
+        val response = httpClient.postJson(
+            path = "/v2/account/delete",
+            jsonBody = requestBody.toString()
+        )
         if (response.statusCode !in 200..299) {
-            throw IllegalStateException("Failed to delete rewards account (${response.statusCode}).")
+            throw accountDeleteServerError(response, "Account deletion failed")
         }
 
         clearLocalWalletAndAccountState()
     }
+
+    private suspend fun fetchDeleteAccountNonce(): DeleteAccountNonceResponse {
+        var response = httpClient.postJson("/v2/account/delete/nonce", "{}")
+        if (response.statusCode == 401 || response.statusCode == 403) {
+            authManager.invalidateSession()
+            authManager.ensureSession(walletManager)
+            response = httpClient.postJson("/v2/account/delete/nonce", "{}")
+        }
+
+        if (response.statusCode !in 200..299) {
+            throw accountDeleteServerError(response, "Account deletion nonce failed")
+        }
+
+        val json = JSONObject(response.body)
+        return DeleteAccountNonceResponse(
+            nonce = json.getString("nonce"),
+            messageToSign = json.getString("messageToSign")
+        )
+    }
+
+    private fun accountDeleteServerError(
+        response: HttpResponse,
+        fallback: String
+    ): IllegalStateException {
+        val body = response.body.trim()
+        val message = if (body.isBlank()) {
+            "$fallback (${response.statusCode})."
+        } else {
+            "$fallback (${response.statusCode}): $body"
+        }
+        return IllegalStateException(message)
+    }
+
+    private data class DeleteAccountNonceResponse(
+        val nonce: String,
+        val messageToSign: String
+    )
 
     private suspend fun clearLocalWalletAndAccountState() {
         walletManager.removeWalletFromDevice()
@@ -937,23 +972,6 @@ class SplitRootViewModel(
 
     suspend fun createCashAppBuyUrl(amountSats: Long): String {
         return walletManager.createCashAppBuyUrl(amountSats = amountSats)
-    }
-
-    suspend fun fetchUnclaimedBitcoinDeposits(): List<UnclaimedBitcoinDeposit> {
-        return walletManager.listUnclaimedBitcoinDeposits()
-    }
-
-    suspend fun claimBitcoinDeposit(
-        deposit: UnclaimedBitcoinDeposit
-    ) {
-        val feeRate = deposit.requiredFeeRateSatPerVbyte
-            ?: throw IllegalStateException("This deposit is not currently claimable.")
-
-        walletManager.claimDepositWithRate(
-            txid = deposit.txid,
-            vout = deposit.vout,
-            satPerVbyte = feeRate
-        )
     }
 
     suspend fun fetchTransactionRows(
@@ -1935,11 +1953,6 @@ class SplitRootViewModel(
         val info = walletManager.currentLightningAddressInfo()
         if (info != null) {
             runCatching {
-                profileIdentityRepository.syncLightningAddress(
-                    lightningAddress = info.lightningAddress,
-                    authManager = authManager,
-                    walletManager = walletManager
-                )
                 messageKeyManager.ensureRegistered(authManager, walletManager)
                 MessagingDeviceTokenSyncScheduler.enqueue(getApplication())
             }
@@ -1965,11 +1978,6 @@ class SplitRootViewModel(
         )
 
         runCatching {
-            profileIdentityRepository.syncLightningAddress(
-                lightningAddress = created.lightningAddress,
-                authManager = authManager,
-                walletManager = walletManager
-            )
             messageKeyManager.ensureRegistered(authManager, walletManager)
             MessagingDeviceTokenSyncScheduler.enqueue(getApplication())
         }
@@ -2032,59 +2040,6 @@ class SplitRootViewModel(
         )
     }
 
-    suspend fun fetchNearbyCoupons(
-        latitude: Double,
-        longitude: Double,
-        radiusMiles: Double = 25.0
-    ): NearbyCouponsResponse {
-        return merchantCouponsRepository.fetchNearbyCoupons(
-            latitude = latitude,
-            longitude = longitude,
-            radiusMiles = radiusMiles,
-            authManager = authManager,
-            walletManager = walletManager
-        )
-    }
-
-    suspend fun fetchNearbyCoupons(
-        postalCode: String,
-        radiusMiles: Double = 25.0
-    ): NearbyCouponsResponse {
-        return merchantCouponsRepository.fetchNearbyCoupons(
-            postalCode = postalCode,
-            radiusMiles = radiusMiles,
-            authManager = authManager,
-            walletManager = walletManager
-        )
-    }
-
-    suspend fun redeemNearbyCoupon(
-        couponId: String
-    ): RedeemNearbyCouponResponse {
-        return merchantCouponsRepository.redeemCoupon(
-            couponId = couponId,
-            authManager = authManager,
-            walletManager = walletManager
-        )
-    }
-
-    suspend fun fetchBitcoinEvents(
-        latitude: Double,
-        longitude: Double
-    ): BitcoinEventsResponse {
-        return bitcoinEventsRepository.fetchEvents(
-            latitude = latitude,
-            longitude = longitude
-        )
-    }
-
-    suspend fun fetchBitcoinEvents(
-        postalCode: String
-    ): BitcoinEventsResponse {
-        return bitcoinEventsRepository.fetchEvents(
-            postalCode = postalCode
-        )
-    }
 
     fun conversationPreviews(searchQuery: String = ""): List<MessageConversationPreview> {
         return messagingRepository.conversationPreviews(searchQuery)

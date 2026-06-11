@@ -1,6 +1,11 @@
 # Split Messaging Privacy and Trust
 
-This document describes the current Split messaging system.
+This document describes the current Split messaging system as used by the Android client and backend.
+
+## Version Scope
+
+The current public Android client uses the backend `/messaging/v4/*` API surface. Older v2, v3, and unversioned messaging routes are not used by this snapshot.
+
 
 ## Summary
 
@@ -8,8 +13,8 @@ Split messaging provides:
 
 - end-to-end encryption for message bodies
 - client-side encryption for attachments before upload
-- wallet-signed binding between wallet pubkey, Lightning address, and messaging pubkey
-- client verification of recipient directory proofs
+- wallet-signed binding between wallet pubkey, Lightning address hash, and messaging pubkey
+- client verification of recipient wallet-signed bindings
 - signed APNs/FCM device registration
 - relay cleanup for acknowledged, expired, failed, and received items
 
@@ -27,10 +32,16 @@ Short version:
 
 ## Identity
 
+Identity routes:
+
+- `GET /messaging/v4/identity`
+- `POST /messaging/v4/identity`
+
+
 Each messaging identity contains:
 
 - `walletPubkey`
-- `lightningAddress`
+- `lightningAddressHash`
 - `messagingPubkey`
 - `messagingIdentitySignature`
 - `messagingIdentitySignatureVersion`
@@ -38,21 +49,21 @@ Each messaging identity contains:
 
 The mobile client creates or restores the messaging key locally. The wallet signs the identity binding locally. The backend verifies that wallet signature before accepting the binding.
 
-Accepted bindings are stored on the user record and appended to the messaging directory log.
+Accepted bindings are stored in messaging-specific account and binding records, separate from the core user record.
 
 ## Directory
 
-Recipients are resolved through `/messaging/v3/directory/lookup`.
+Recipients are resolved through `/messaging/v4/directory/lookup`.
 
-The backend returns the recipient's wallet-signed binding, a Merkle inclusion proof, and a checkpoint containing `rootHash`, `treeSize`, and `issuedAt`.
+The backend returns the recipient's wallet-signed binding plus backend-owned directory metadata.
 
-The client verifies the binding and proof before using the recipient messaging key.
+The client verifies the wallet-signed binding before using the recipient messaging key. The current v4 directory payload does not include an independent Merkle proof or external witness.
 
 Important limit: Split operates the directory. There is no external witness, gossip system, or public transparency monitor today.
 
 ## Messages
 
-Messages are sent through `/messaging/v3/send` and fetched through `/messaging/v3/inbox`.
+Messages are sent through `/messaging/v4/send` and fetched through `/messaging/v4/inbox`.
 
 The backend enforces:
 
@@ -66,19 +77,28 @@ The backend enforces:
 
 For current sealed envelopes, the relay stores routing metadata plus ciphertext, nonce, sender ephemeral pubkey, message type, and expiry. The plaintext body is inside the encrypted payload.
 
-Older non-sealed sends also include a sender envelope signature that the backend verifies before storing the relay message.
+After local processing, clients acknowledge messages through `/messaging/v4/ack`. Acknowledged pending messages are deleted from the relay.
 
-After local processing, clients acknowledge messages through `/messaging/v3/ack`. Acknowledged pending messages are deleted from the relay.
+Clients can report delivery problems through `/messaging/v4/decrypt-failed` and `/messaging/v4/rekey-required`. Senders can check status through `/messaging/v4/outgoing-statuses`.
 
-Clients can report delivery problems through `/messaging/v3/decrypt-failed` and `/messaging/v3/rekey-required`. Senders can check status through `/messaging/v3/outgoing-statuses`.
+## Blocks
+
+Block routes are:
+
+- `GET /messaging/v4/blocks`
+- `POST /messaging/v4/blocks`
+- `DELETE /messaging/v4/blocks/:target`
+
+Blocks are stored and enforced in the v4 messaging account domain.
+
 
 ## Push
 
-Device registrations use `/messaging/v3/device-registrations`.
+Device registrations use `/messaging/v4/device-registrations`.
 
 The wallet signs the registration over wallet pubkey, active messaging pubkey, platform, environment, device token, and timestamp.
 
-APNs new-message pushes show a generic notification:
+iOS APNs new-message pushes show a generic notification:
 
 - title: `Split`
 - body: `New message`
@@ -86,6 +106,12 @@ APNs new-message pushes show a generic notification:
 FCM pushes use data payloads. Push payloads do not include message plaintext, but Apple and Google still see push delivery metadata.
 
 ## Attachments
+
+Attachment routes are:
+
+- `POST /messaging/v4/attachments/upload`
+- `GET /messaging/v4/attachments/:attachmentId/download`
+- `POST /messaging/v4/attachments/mark-received`
 
 Attachments are encrypted by the client before upload.
 
@@ -98,7 +124,7 @@ Attachment decryption material is carried inside the encrypted message payload. 
 Split still sees relay metadata:
 
 - authenticated sender and recipient accounts
-- wallet pubkeys and Lightning addresses
+- wallet pubkeys during authenticated requests and messaging lookup hashes at rest
 - recipient lookups
 - sender/recipient graph
 - message timing and type
@@ -141,7 +167,7 @@ Current backend behavior:
 Strong properties:
 
 - The wallet authorizes the identity binding.
-- The client verifies recipient directory proofs.
+- The client verifies recipient wallet-signed bindings.
 - The relay should not receive message plaintext or plaintext attachment bytes.
 - The backend does not back up local messaging private keys.
 

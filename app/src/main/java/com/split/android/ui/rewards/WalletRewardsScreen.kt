@@ -67,7 +67,6 @@ internal val RewardsHowItWorksParagraphs = listOf(
 @Composable
 fun WalletRewardsScreen(
     rootViewModel: SplitRootViewModel,
-    onOpenBitcoinEvents: () -> Unit,
     onOpenContacts: () -> Unit,
     onOpenProfile: () -> Unit,
     onOpenMerchantMap: () -> Unit,
@@ -126,7 +125,6 @@ fun WalletRewardsScreen(
             verticalArrangement = Arrangement.spacedBy(12.dp)
         ) {
             MainTabHeader(
-                onOpenBitcoinEvents = onOpenBitcoinEvents,
                 onOpenContacts = onOpenContacts,
                 onOpenProfile = onOpenProfile,
                 onOpenMerchantMap = onOpenMerchantMap

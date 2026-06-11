@@ -40,27 +40,44 @@ class SplitHttpClient {
         }
     }
 
-    suspend fun get(path: String): HttpResponse = request(
+    suspend fun get(
+        path: String,
+        headers: Map<String, String> = emptyMap()
+    ): HttpResponse = request(
         method = "GET",
         path = path,
-        jsonBody = null
+        jsonBody = null,
+        headers = headers
     )
 
-    suspend fun delete(path: String): HttpResponse = request(
+    suspend fun delete(
+        path: String,
+        headers: Map<String, String> = emptyMap()
+    ): HttpResponse = request(
         method = "DELETE",
         path = path,
-        jsonBody = null
+        jsonBody = null,
+        headers = headers
     )
 
-    suspend fun getBytes(path: String): BinaryHttpResponse = binaryRequest(
+    suspend fun getBytes(
+        path: String,
+        headers: Map<String, String> = emptyMap()
+    ): BinaryHttpResponse = binaryRequest(
         method = "GET",
-        path = path
+        path = path,
+        headers = headers
     )
 
-    suspend fun postJson(path: String, jsonBody: String?): HttpResponse = request(
+    suspend fun postJson(
+        path: String,
+        jsonBody: String?,
+        headers: Map<String, String> = emptyMap()
+    ): HttpResponse = request(
         method = "POST",
         path = path,
         jsonBody = jsonBody,
+        headers = headers,
         retryOnIoFailure = false
     )
 
@@ -70,7 +87,8 @@ class SplitHttpClient {
         fileFieldName: String,
         fileName: String,
         mimeType: String,
-        fileData: ByteArray
+        fileData: ByteArray,
+        headers: Map<String, String> = emptyMap()
     ): HttpResponse = postMultipart(
         path = path,
         formFields = formFields,
@@ -81,13 +99,15 @@ class SplitHttpClient {
                 mimeType = mimeType,
                 fileData = fileData
             )
-        )
+        ),
+        headers = headers
     )
 
     suspend fun postMultipart(
         path: String,
         formFields: Map<String, String>,
-        files: List<MultipartFilePart>
+        files: List<MultipartFilePart>,
+        headers: Map<String, String> = emptyMap()
     ): HttpResponse = withContext(Dispatchers.IO) {
         val boundary = "Boundary-${System.currentTimeMillis()}"
         val url = URL("${AppConfig.baseUrl}$path")
@@ -101,6 +121,9 @@ class SplitHttpClient {
             instanceFollowRedirects = true
             setRequestProperty("Content-Type", "multipart/form-data; boundary=$boundary")
             setRequestProperty("Accept", "application/json")
+            headers.forEach { (key, value) ->
+                setRequestProperty(key, value)
+            }
         }
 
         try {
@@ -151,6 +174,7 @@ class SplitHttpClient {
         method: String,
         path: String,
         jsonBody: String?,
+        headers: Map<String, String>,
         retryOnIoFailure: Boolean = method == "GET" || method == "DELETE"
     ): HttpResponse {
         val maxAttempts = if (retryOnIoFailure) {
@@ -168,7 +192,8 @@ class SplitHttpClient {
                     executeRequest(
                         method = method,
                         path = path,
-                        jsonBody = jsonBody
+                        jsonBody = jsonBody,
+                        headers = headers
                     )
                 }
             } catch (error: IOException) {
@@ -188,7 +213,8 @@ class SplitHttpClient {
     private fun executeRequest(
         method: String,
         path: String,
-        jsonBody: String?
+        jsonBody: String?,
+        headers: Map<String, String>
     ): HttpResponse {
         val url = URL("${AppConfig.baseUrl}$path")
         val connection = (url.openConnection() as HttpURLConnection).apply {
@@ -203,6 +229,9 @@ class SplitHttpClient {
                 doOutput = true
                 setRequestProperty("Content-Type", "application/json")
                 setRequestProperty("Accept", "application/json")
+            }
+            headers.forEach { (key, value) ->
+                setRequestProperty(key, value)
             }
         }
 
@@ -232,7 +261,8 @@ class SplitHttpClient {
 
     private suspend fun binaryRequest(
         method: String,
-        path: String
+        path: String,
+        headers: Map<String, String>
     ): BinaryHttpResponse {
         var attempt = 0
         var lastError: IOException? = null
@@ -242,7 +272,8 @@ class SplitHttpClient {
                 return withContext(Dispatchers.IO) {
                     executeBinaryRequest(
                         method = method,
-                        path = path
+                        path = path,
+                        headers = headers
                     )
                 }
             } catch (error: IOException) {
@@ -261,7 +292,8 @@ class SplitHttpClient {
 
     private fun executeBinaryRequest(
         method: String,
-        path: String
+        path: String,
+        headers: Map<String, String>
     ): BinaryHttpResponse {
         val url = URL("${AppConfig.baseUrl}$path")
         val connection = (url.openConnection() as HttpURLConnection).apply {
@@ -271,6 +303,9 @@ class SplitHttpClient {
             doInput = true
             instanceFollowRedirects = true
             useCaches = false
+            headers.forEach { (key, value) ->
+                setRequestProperty(key, value)
+            }
         }
 
         return try {

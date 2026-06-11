@@ -24,11 +24,12 @@ class MessagingBlockRepository(
     ): List<MessagingBlockedUser> {
         authManager.ensureSession(walletManager)
 
-        var response = httpClient.get("/messaging/v4/blocks")
+        val headers = authenticatedWalletPubkeyHeaders(walletManager.currentWalletPubkey())
+        var response = httpClient.get("/messaging/v4/blocks", headers)
         if (response.statusCode == 401 || response.statusCode == 403) {
             authManager.invalidateSession()
             authManager.ensureSession(walletManager)
-            response = httpClient.get("/messaging/v4/blocks")
+            response = httpClient.get("/messaging/v4/blocks", headers)
         }
 
         if (response.statusCode !in 200..299) {
@@ -59,6 +60,7 @@ class MessagingBlockRepository(
         }
 
         authManager.ensureSession(walletManager)
+        val headers = authenticatedWalletPubkeyHeaders(walletManager.currentWalletPubkey())
 
         val requestBody = JSONObject()
             .put("lightningAddressHash", MessagingPrivacyV4.lightningAddressClientHash(normalizedLightningAddress))
@@ -66,14 +68,16 @@ class MessagingBlockRepository(
 
         var response = httpClient.postJson(
             path = "/messaging/v4/blocks",
-            jsonBody = requestBody.toString()
+            jsonBody = requestBody.toString(),
+            headers = headers
         )
         if (response.statusCode == 401 || response.statusCode == 403) {
             authManager.invalidateSession()
             authManager.ensureSession(walletManager)
             response = httpClient.postJson(
                 path = "/messaging/v4/blocks",
-                jsonBody = requestBody.toString()
+                jsonBody = requestBody.toString(),
+                headers = headers
             )
         }
 
@@ -108,11 +112,12 @@ class MessagingBlockRepository(
 
         authManager.ensureSession(walletManager)
 
-        var response = httpClient.delete("/messaging/v4/blocks/$targetHash")
+        val headers = authenticatedWalletPubkeyHeaders(walletManager.currentWalletPubkey())
+        var response = httpClient.delete("/messaging/v4/blocks/$targetHash", headers)
         if (response.statusCode == 401 || response.statusCode == 403) {
             authManager.invalidateSession()
             authManager.ensureSession(walletManager)
-            response = httpClient.delete("/messaging/v4/blocks/$targetHash")
+            response = httpClient.delete("/messaging/v4/blocks/$targetHash", headers)
         }
 
         if (response.statusCode !in 200..299) {
